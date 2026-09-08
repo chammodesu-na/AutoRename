@@ -1,0 +1,8 @@
+watchdog
+openpyxl
+xlrd
+python-docx
+pymupdf
+pillow
+pystray
+pyinstaller

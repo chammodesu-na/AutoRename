@@ -1,0 +1,32 @@
+# ── 빌드 산출물 (Releases 로 배포하므로 저장소에는 넣지 않는다) ──
+build/
+dist/
+Output/
+*.spec
+python.zip
+
+# ── 로컬 백업 ──
+_backup_*/
+_paused/
+
+# ── 파이썬 ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ── 사용자 데이터 (원래 홈 디렉터리에 저장되지만 실수 방지용) ──
+# API 키가 들어 있으므로 절대 커밋하지 말 것
+rename_watcher_config.json
+rename_watcher_learning_log.json
+rename_watcher_pattern_summary.json
+rename_watcher_failed_files.json
+rename_watcher_quota_state.json
+rename_watcher.log
+
+# ── 기타 ──
+*.exe
+*.zip
+Thumbs.db
+.DS_Store
