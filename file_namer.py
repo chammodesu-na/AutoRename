@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import mimetypes
 import datetime
+import unicodedata
 import urllib.request
 import urllib.error
 from urllib.parse import urlparse
@@ -54,6 +55,19 @@ AI_PROVIDERS = ("gemini", "openai", "claude")
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 MAX_RETRIES = 2          # 최초 시도 포함 최대 3번 시도
 RETRY_DELAY_SECONDS = 4  # 재시도 사이 대기 시간(초)
+# 요청 하나의 최대 대기. 종전 300초 — 과부하(503) 때 응답이 늦게 와서 파일 하나에 287초가 걸렸고(2026-10-06 실측),
+# 큐가 직렬이라 그동안 다른 파일도 전부 멈췄다. 정상 응답은 2~12초.
+REQUEST_TIMEOUT_SECONDS = 60
+# 한 모델에서 재시도에 쓸 총 시간. 넘으면 재시도하지 않고 다음 모델로 넘긴다.
+RETRY_BUDGET_SECONDS = 75
+
+# 무료 키의 Gemini 한도는 **모델별**이다(2026-10-06 실측: 3.5·3.6 Flash 각각 하루 20회, 분당 5회).
+# 그래서 고른 모델이 한도(429)·과부하(503)에 막히면 아래 순서로 다음 모델을 무료로 시도한다 → 하루 총량이 모델 수만큼 는다.
+# 품질 순서: Flash 계열 먼저, Lite 는 마지막(실측에서 거래처명을 바꿔 쓰는 경향 — IBK기업은행→중소기업은행).
+GEMINI_FALLBACK_ORDER = (
+    "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash",
+    "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+)
 
 # ====================== 무료 키 소진 시 유료 키 자동 전환 (2026-09-08 추가) ======================
 # 무료 티어는 "분당 N회"와 "하루 N회" 두 한도가 따로 걸리는데 둘 다 429로 온다. 성격이 달라서 대응도 다르다.
@@ -197,7 +211,13 @@ def get_source_domain(filepath: str) -> str | None:
         return None
 
 
+def nfc(s: str) -> str:
+    """자모가 풀린 한글(NFD: 맥·일부 웹에서 받은 파일명/본문 'ㅅㅔㄱㅡㅁ')을 완성형으로 합친다. 결과가 확정적이라 모델에 맡기지 않는다."""
+    return unicodedata.normalize("NFC", s or "")
+
+
 def _truncate(text: str, limit: int) -> str:
+    text = nfc(text)
     if len(text) > limit:
         return text[:limit] + "\n...(중략/글자수제한 초과)"
     return text
@@ -343,17 +363,40 @@ def extract_text_preview(filepath: str, limit: int) -> str:
         return f"(텍스트를 읽을 수 없음: {e})"
 
 
+IMAGE_MAX_SIDE = 2000          # 긴 변. 문서 글자를 읽기엔 충분하고 요청 크기 한도(인라인 약 20MB)와 거리가 멀다
+IMAGE_MAX_BYTES = 3 * 1024 * 1024  # 이보다 큰 원본은 변 길이와 무관하게 다시 인코딩
+
+
 def get_image_base64(filepath: str) -> tuple[str, str] | None:
-    """이미지를 base64로 인코딩합니다."""
+    """
+    이미지를 base64로 인코딩합니다. 크면 긴 변 IMAGE_MAX_SIDE 로 줄여 JPEG 로 다시 굽는다.
+    원본을 그대로 보내면 고해상도 사진·스캔이 요청 크기 한도를 넘어 400 으로 실패하는데,
+    400 은 '설정 오류'로 분류돼 유료 키로도 안 넘어가고 그냥 실패한다.
+    """
     mime, _ = mimetypes.guess_type(filepath)
     if not mime:
         mime = "image/jpeg"
     try:
         with open(filepath, "rb") as f:
-            data = base64.b64encode(f.read()).decode("utf-8")
-        return mime, data
+            raw = f.read()
     except Exception:
         return None
+
+    try:
+        from PIL import Image, ImageOps
+        import io
+        with Image.open(io.BytesIO(raw)) as im:
+            if max(im.size) > IMAGE_MAX_SIDE or len(raw) > IMAGE_MAX_BYTES:
+                im = ImageOps.exif_transpose(im)  # 폰 사진 회전 정보 반영(줄이면 EXIF 가 사라지므로 먼저)
+                im = im.convert("RGB")             # 투명 PNG·팔레트·CMYK 를 JPEG 로 굽기 위해
+                im.thumbnail((IMAGE_MAX_SIDE, IMAGE_MAX_SIDE), Image.LANCZOS)
+                buf = io.BytesIO()
+                im.save(buf, format="JPEG", quality=88)
+                raw, mime = buf.getvalue(), "image/jpeg"
+    except Exception:
+        pass  # PIL 이 못 여는 형식이면 원본 그대로 보낸다(종전 동작)
+
+    return mime, base64.b64encode(raw).decode("utf-8")
 
 
 def _read_via_copy(filepath: str, func, *args):
@@ -385,6 +428,134 @@ def _read_via_copy(filepath: str, func, *args):
             os.rmdir(tmp_dir)
         except Exception:
             pass
+
+
+# ====================== 사실값 후보 추출 · 로컬 OCR ======================
+# 원칙: 원문은 그대로 보내고 아래 결과는 "덧붙이기"만 한다. 정규식이 뽑은 값은 틀릴 수 있으므로
+# 근거 줄과 함께 '후보'로만 주고 판단은 모델이 한다(거래처명처럼 판단이 필요한 값은 아예 뽑지 않는다).
+
+_DATE_PATTERNS = [
+    re.compile(r"(?<!\d)(20\d{2})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})(?!\d)"),
+    re.compile(r"(20\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일"),
+    re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)"),
+]
+_AMOUNT_RE = re.compile(
+    r"(?:(USD|EUR|JPY|CNY|GBP|KRW|US\$|\$|€|¥|￦|₩)\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d{2}))"
+    r"|(?:(\d{1,3}(?:,\d{3})+(?:\.\d+)?)\s*(USD|EUR|JPY|CNY|GBP|KRW|원))"
+)
+_BIZNO_RE = re.compile(r"(?<!\d)(\d{3})\s*-\s*(\d{2})\s*-\s*(\d{5})(?!\d)")
+
+
+def _label_before(line: str, start: int) -> str:
+    """값 바로 앞의 글자(최대 14자)를 근거 라벨로. 예: '작성일자 2026-08-31' → '작성일자'"""
+    return re.sub(r"\s+", " ", line[max(0, start - 14):start]).strip(" :|[]()")
+
+
+def extract_fact_candidates(text: str, max_each: int = 8) -> str:
+    dates, amounts, biz = [], [], []
+    for line in (text or "").splitlines():
+        for pat in _DATE_PATTERNS:
+            for m in pat.finditer(line):
+                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                try:
+                    datetime.date(y, mo, d)
+                except ValueError:
+                    continue  # 계좌번호·승인번호 같은 숫자열이 날짜처럼 잡히는 것 거르기
+                v = f"{y:04d}{mo:02d}{d:02d}"
+                if v not in [x[0] for x in dates]:
+                    dates.append((v, _label_before(line, m.start())))
+        for m in _AMOUNT_RE.finditer(line):
+            v = m.group(0).strip()
+            if v not in [x[0] for x in amounts]:
+                amounts.append((v, _label_before(line, m.start())))
+        for m in _BIZNO_RE.finditer(line):
+            v = "-".join(m.groups())
+            if v not in biz:
+                biz.append(v)
+
+    out = []
+    if dates:
+        out.append("- 날짜 후보(YYYYMMDD): " + ", ".join(f"{v}({lab})" if lab else v for v, lab in dates[:max_each]))
+    if amounts:
+        out.append("- 금액 후보: " + ", ".join(f"{v}({lab})" if lab else v for v, lab in amounts[:max_each]))
+    if biz:
+        out.append("- 사업자등록번호: " + ", ".join(biz[:4]))
+    if not out:
+        return ""
+    return ("[참고: 프로그램이 본문에서 기계적으로 찾은 값 후보 — 괄호는 바로 앞 글자. 틀릴 수 있으니 원문과 맞을 때만 써]\n"
+            + "\n".join(out))
+
+
+_OCR_PS = r"""
+param([string]$Img, [string]$Out)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$at = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+function Await($t, $rt) { $m = $at.MakeGenericMethod($rt); $x = $m.Invoke($null, @($t)); $x.Wait(-1) | Out-Null; $x.Result }
+[Windows.Globalization.Language, Windows.Foundation, ContentType=WindowsRuntime] | Out-Null
+[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime] | Out-Null
+[Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType=WindowsRuntime] | Out-Null
+[Windows.Storage.StorageFile, Windows.Foundation, ContentType=WindowsRuntime] | Out-Null
+$e = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage((New-Object Windows.Globalization.Language 'ko'))
+if (-not $e) { $e = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
+if (-not $e) { exit 3 }
+$f = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Img)) ([Windows.Storage.StorageFile])
+$s = Await ($f.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$d = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($s)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$b = Await ($d.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$r = Await ($e.RecognizeAsync($b)) ([Windows.Media.Ocr.OcrResult])
+$s.Dispose()
+($r.Lines | ForEach-Object { $_.Text }) -join "`n" | Out-File -FilePath $Out -Encoding utf8
+"""
+
+
+def local_ocr(image_bytes: bytes, timeout: int = 40) -> str:
+    """
+    윈도우 내장 OCR(WinRT, 외부 전송 없음). PowerShell 5.1 로 돌려 파이썬 의존성이 늘지 않는다.
+    실패하면 빈 문자열 — 그 경우 종전처럼 이미지만 보낸다.
+    """
+    import subprocess
+    tmp_dir = tempfile.mkdtemp(prefix="rw_ocr_")
+    try:
+        img = os.path.join(tmp_dir, "page.png")
+        out = os.path.join(tmp_dir, "ocr.txt")
+        ps1 = os.path.join(tmp_dir, "ocr.ps1")
+        with open(img, "wb") as f:
+            f.write(image_bytes)
+        with open(ps1, "w", encoding="utf-8-sig") as f:  # PS 5.1 은 BOM 없으면 한글 스크립트를 ANSI 로 읽는다
+            f.write(_OCR_PS)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1, "-Img", img, "-Out", out],
+            capture_output=True, timeout=timeout, creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+        if not os.path.exists(out):
+            return ""
+        with open(out, "r", encoding="utf-8-sig") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def enrich_parts(parts: list, kind: str, config: dict, limit: int) -> list:
+    """build_content_parts 결과에 OCR 글자와 사실값 후보를 덧붙인다(원래 parts 는 그대로 둔다)."""
+    extra_text = ""
+    if config.get("local_ocr", True) and kind in ("image", "pdf-image"):
+        img = next((p["inline_data"]["data"] for p in parts if "inline_data" in p), None)
+        if img:
+            ocr = local_ocr(base64.b64decode(img))
+            if ocr:
+                extra_text = ocr
+                parts = parts + [{"text": "[윈도우 내장 OCR로 읽은 글자 — 오인식이 있을 수 있으니 이미지와 다르면 이미지가 우선]\n"
+                                          + _truncate(ocr, limit)}]
+
+    if config.get("extract_facts", True):
+        src = "\n".join(p["text"] for p in parts if "text" in p) + "\n" + extra_text
+        facts = extract_fact_candidates(nfc(src))
+        if facts:
+            parts = [{"text": facts}] + parts
+    return parts
 
 
 def build_content_parts(filepath: str, ext: str, limit: int) -> tuple[list, str]:
@@ -474,9 +645,17 @@ def _save_json_safe(path: str, data) -> bool:
 #    어느 쪽도 동작이 깨지지는 않는다.
 
 def _is_daily_quota_error(body_text: str) -> bool:
-    """429 응답 본문이 '일일 한도 소진'인지(분당 한도가 아니라) 판정한다."""
+    """
+    429 응답 본문이 '일일 한도 소진'인지(분당 한도가 아니라) 판정한다.
+    🚨 반드시 본문 **전체**를 넘길 것 — 표식(quotaId ...PerDay...)은 본문 1,000자 근처에 있어서
+    로그용으로 500자 자른 본문으로 판정하면 항상 '분당'으로 오판한다(2026-10-06 실측, 그동안 일일 소진을 한 번도 기억 못 했다).
+    """
     normalized = re.sub(r"[\s_\-]+", "", body_text or "").lower()
-    return any(marker in normalized for marker in DAILY_QUOTA_MARKERS)
+    if any(marker in normalized for marker in DAILY_QUOTA_MARKERS):
+        return True
+    # 표식이 없더라도 재시도 대기가 10분을 넘으면 분당 한도일 수 없다
+    m = re.search(r'"retryDelay"\s*:\s*"(\d+)s"', body_text or "")
+    return bool(m and int(m.group(1)) > 600)
 
 
 def _load_quota_state() -> dict:
@@ -660,7 +839,7 @@ def update_pattern_summary(log: list | None = None):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         candidates = data.get("candidates", [])
         summary = candidates[0]["content"]["parts"][0]["text"].strip()
@@ -688,7 +867,10 @@ SYSTEM_PROMPT_TEMPLATE = """\
 아래 어딘가에 [사용자 정의 추가 지침] 섹션이 있고, 그 안에 이 파일과 같은 종류/조건에 대해 구체적인 파일명 형식(순서, 접두사, 구분자 등)이
 명시돼 있다면(예: 전신문/해외송금 확인서, 카드 사용내역 등 특정 케이스에 대한 형식 지정), 다른 모든 규칙(아래 summary/site 조합 방식)보다
 이 지침을 최우선으로 따라야 해.
-이 경우 그 지침대로 완성한 최종 파일명(확장자 제외, 날짜가 필요하면 오늘 날짜 {today} 사용)을 custom_filename 필드에 그대로 채워.
+이 경우 그 지침대로 완성한 최종 파일명(확장자 제외)을 custom_filename 필드에 그대로 채워.
+날짜가 필요하면: 지침이 문서의 날짜(증빙날짜·입금날짜·작성일자·납부기한 등)를 가리키면 파일 내용에서 그 날짜를 찾아 쓰고,
+그런 지시가 없거나 문서에서 날짜를 찾을 수 없을 때만 오늘 날짜 {today}를 써.
+지침이 날짜 자릿수(예: yymmdd)를 정하지 않았으면 날짜는 항상 YYYYMMDD 8자리로 써.
 custom_filename을 채웠다면 summary/site는 참고용일 뿐 실제로는 무시되니 대충 채워도 무방해.
 사용자 정의 지침에 해당 케이스에 대한 구체적 형식 지정이 없으면 custom_filename은 반드시 null로 둬.
 
@@ -813,7 +995,7 @@ def _call_gemini(system_prompt: str, parts: list, api_key: str, max_output_token
     req = urllib.request.Request(
         url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
         data = json.loads(resp.read().decode("utf-8"))
 
     raw_text = ""
@@ -863,7 +1045,7 @@ def _call_openai(system_prompt: str, parts: list, api_key: str, max_output_token
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
         data = json.loads(resp.read().decode("utf-8"))
 
     text = data["choices"][0]["message"]["content"].strip()
@@ -906,7 +1088,7 @@ def _call_claude(system_prompt: str, parts: list, api_key: str, max_output_token
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
         data = json.loads(resp.read().decode("utf-8"))
 
     text = data["content"][0]["text"].strip()
@@ -934,21 +1116,25 @@ def _call_with_retries(call_fn, system_prompt: str, parts: list, api_key: str,
       status = "ok"           성공
              | "quota_day"    429이고 일일 한도 소진 → 오늘은 이 키를 더 쓸 수 없다
              | "quota_minute" 429이고 분당 한도 → 잠시 뒤엔 다시 쓸 수 있다
+             | "unavailable"  503 등 과부하·응답 시간 초과 → 다른 모델은 멀쩡할 수 있다
              | "fail"         그 외 실패(401/400 등). 키를 바꿔도 같은 결과일 가능성이 높다
     """
+    started = time.time()
     for attempt in range(MAX_RETRIES + 1):
         try:
             parsed, usage = call_fn(system_prompt, parts, api_key, max_output_tokens)
             return "ok", parsed, usage
         except urllib.error.HTTPError as e:
             try:
-                body_text = e.read().decode("utf-8", errors="ignore")[:500]
+                full_body = e.read().decode("utf-8", errors="ignore")
             except Exception:
-                body_text = "(응답 본문 읽기 실패)"
+                full_body = "(응답 본문 읽기 실패)"
+            body_text = full_body[:500]  # 로그용. 판정은 full_body 로 한다(_is_daily_quota_error 주석 참고)
 
-            # 429는 대기로 버티지 않고 곧바로 빠져나가 상위에서 유료 키로 넘긴다.
+            # 429는 대기로 버티지 않고 곧바로 빠져나가 상위에서 다음 모델/유료 키로 넘긴다.
             # (4초 대기로는 분당 한도가 회복되지 않으므로 재시도해봐야 같은 429만 맞는다)
-            if e.code in RETRYABLE_HTTP_CODES and e.code != 429 and attempt < MAX_RETRIES:
+            within_budget = time.time() - started + RETRY_DELAY_SECONDS < RETRY_BUDGET_SECONDS
+            if e.code in RETRYABLE_HTTP_CODES and e.code != 429 and attempt < MAX_RETRIES and within_budget:
                 _log_error(
                     f"[AI 재시도] {fullname}: {provider}({key_label} 키) HTTP {e.code} 일시적 오류 - "
                     f"{RETRY_DELAY_SECONDS}초 후 재시도 ({attempt + 1}/{MAX_RETRIES}) / {body_text}"
@@ -957,7 +1143,9 @@ def _call_with_retries(call_fn, system_prompt: str, parts: list, api_key: str,
                 continue
 
             if e.code == 429:
-                status = "quota_day" if _is_daily_quota_error(body_text) else "quota_minute"
+                status = "quota_day" if _is_daily_quota_error(full_body) else "quota_minute"
+            elif e.code in RETRYABLE_HTTP_CODES:
+                status = "unavailable"  # 503 등 과부하 — 다른 모델은 멀쩡할 수 있다
             else:
                 status = "fail"
 
@@ -970,6 +1158,9 @@ def _call_with_retries(call_fn, system_prompt: str, parts: list, api_key: str,
         except Exception as e:
             print(f"[API 호출 실패] {e}")
             _log_error(f"[AI 분석 오류] {fullname}: {provider}({key_label} 키) API 호출 실패 - {e}")
+            # 응답 시간 초과는 과부하와 같게 취급 — 다른 모델로 넘긴다
+            if isinstance(e, TimeoutError) or "timed out" in str(e).lower():
+                return "unavailable", None, None
             return "fail", None, None
 
     return "fail", None, None
@@ -984,6 +1175,25 @@ def _build_call_fn(provider: str, config: dict):
         gemini_model = config.get("gemini_model", DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
         return functools.partial(_call_gemini, model=gemini_model), f"{provider}:{gemini_model}"
     return {"openai": _call_openai, "claude": _call_claude}[provider], provider
+
+
+def _free_gemini_stages(config: dict) -> list:
+    """
+    무료 Gemini 키로 시도할 (모델, 호출함수, 한도키) 순서. 고른 모델이 맨 앞이고 나머지는 GEMINI_FALLBACK_ORDER.
+    오늘 일일 한도가 소진된 모델은 뺀다(어차피 429 — 파일마다 헛호출만 는다).
+    config["gemini_model_rotation"] 이 False 면 고른 모델 하나만(종전 동작).
+    """
+    chosen = config.get("gemini_model", DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
+    models = [chosen]
+    if config.get("gemini_model_rotation", True):
+        models += [m for m in GEMINI_FALLBACK_ORDER if m != chosen]
+    stages = []
+    for m in models:
+        qk = f"gemini:{m}"
+        if is_free_quota_exhausted(qk):
+            continue
+        stages.append((m, functools.partial(_call_gemini, model=m), qk))
+    return stages
 
 
 def analyze_file(filepath: str) -> dict | None:
@@ -1029,9 +1239,10 @@ def analyze_file(filepath: str) -> dict | None:
 
     # 가벼운 2000자 한도로 텍스트 미리보기 데이터 파싱
     parts, _debug = build_content_parts(filepath, ext, max_preview_chars)
+    parts = enrich_parts(parts, _debug, config, max_preview_chars)
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        basename=basename, ext=ext, domain=domain, today=today
+        basename=nfc(basename), ext=ext, domain=domain, today=today
     )
 
     # 실시간 사용자 지정 추가 지침 합성
@@ -1068,14 +1279,22 @@ def analyze_file(filepath: str) -> dict | None:
     # 무료 키 → 유료 키 순서로 시도할 계획을 세운다. 각 단계는 자기 공급자의 호출 함수를 갖는다
     # (유료 공급자를 따로 고를 수 있으므로 호출 함수가 서로 다를 수 있다).
     # 오늘 이미 무료 일일 한도가 소진된 게 확인됐고 유료 키가 있으면 무료 키는 아예 건너뛴다.
+    # 각 단계: (라벨, 키, 공급자, 호출함수, 한도키). Gemini 무료는 모델별 한도라 모델을 바꿔 가며 여러 단계를 둔다.
     key_plan = []
-    if api_key and not (paid_api_key and is_free_quota_exhausted(quota_key)):
-        key_plan.append(("무료", api_key, provider, call_fn))
+    if api_key:
+        if provider == "gemini":
+            for m, fn_m, qk in _free_gemini_stages(config):
+                key_plan.append(("무료", api_key, f"gemini/{m}", fn_m, qk))
+            if not key_plan:
+                _log_error(f"[무료 한도 소진] {fullname}: 오늘 무료 Gemini 모델 한도를 모두 썼습니다"
+                           + (" — 유료 키로 처리합니다." if paid_api_key else ". (내일 자동으로 다시 시도)"))
+        elif not (paid_api_key and is_free_quota_exhausted(quota_key)):
+            key_plan.append(("무료", api_key, provider, call_fn, quota_key))
     if paid_api_key:
-        key_plan.append(("유료", paid_api_key, paid_provider, paid_call_fn))
+        key_plan.append(("유료", paid_api_key, paid_provider, paid_call_fn, paid_quota_key))
 
     parsed = usage = None
-    for key_label, key_value, key_provider, key_call_fn in key_plan:
+    for i, (key_label, key_value, key_provider, key_call_fn, stage_qk) in enumerate(key_plan):
         status, parsed, usage = _call_with_retries(
             key_call_fn, system_prompt, parts, key_value, max_output_tokens,
             fullname, key_provider, key_label,
@@ -1084,19 +1303,19 @@ def analyze_file(filepath: str) -> dict | None:
             if key_label == "유료":
                 total = count_paid_call(paid_quota_key)
                 _log_error(f"[유료 키 사용] {fullname}: {paid_quota_key} - 오늘 유료 호출 누적 {total}건")
+            elif i > 0:
+                _log_error(f"[다른 모델로 처리] {fullname}: {key_provider}")
             break
 
-        # 한도(429)로 막힌 경우에만 다음 키로 넘어간다. 401/400 같은 설정 오류는
-        # 키를 바꿔도 성격이 다르므로 유료 키를 괜히 소모하지 않고 여기서 끝낸다.
-        if key_label == "무료" and status in ("quota_day", "quota_minute"):
+        # 한도(429)·과부하(503)로 막힌 경우에만 다음 단계(다음 무료 모델 → 유료 키)로 넘어간다.
+        # 401/400 같은 설정 오류는 모델·키를 바꿔도 성격이 다르므로 괜히 소모하지 않고 여기서 끝낸다.
+        if key_label == "무료" and status in ("quota_day", "quota_minute", "unavailable"):
             if status == "quota_day":
-                mark_free_quota_exhausted(quota_key)
-                _log_error(
-                    f"[무료 한도 소진] {quota_key}: 오늘 남은 건은 유료 키로 처리합니다. "
-                    f"(내일 자동으로 무료 키부터 다시 시도)"
-                )
-            if len(key_plan) > 1:
-                _log_error(f"[유료 키로 전환] {fullname}: 무료 키가 429로 막혀 유료 키로 재시도합니다.")
+                mark_free_quota_exhausted(stage_qk)
+                _log_error(f"[무료 한도 소진] {stage_qk}: 오늘은 이 모델을 건너뜁니다. (내일 자동으로 다시 시도)")
+            if i + 1 < len(key_plan):
+                nxt = key_plan[i + 1]
+                _log_error(f"[다음 단계로 전환] {fullname}: {key_provider} {status} → {nxt[0]} {nxt[2]}")
             continue
 
         return None
@@ -1109,6 +1328,7 @@ def analyze_file(filepath: str) -> dict | None:
     reason = parsed.get("reason", "")
 
     def clean(s: str) -> str:
+        s = nfc(s)
         for ch in '<>:"/\\|?*':
             s = s.replace(ch, "")
         return s.strip()

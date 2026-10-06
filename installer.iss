@@ -6,7 +6,7 @@
 
 #define MyAppName "AutoRename"
 ; ⚠️ updater.py 의 APP_VERSION 과 반드시 같게 맞춘다
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "AutoRename"
 #define MyAppExeName "AutoRename.exe"
 
