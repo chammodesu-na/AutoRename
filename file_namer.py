@@ -527,6 +527,7 @@ def local_ocr(image_bytes: bytes, timeout: int = 40) -> str:
         subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1, "-Img", img, "-Out", out],
             capture_output=True, timeout=timeout, creationflags=0x08000000,  # CREATE_NO_WINDOW
+            stdin=subprocess.DEVNULL,  # --windowed exe 는 표준입력 핸들이 없어 상속하면 '핸들이 잘못됨'으로 실패할 수 있다
         )
         if not os.path.exists(out):
             return ""
