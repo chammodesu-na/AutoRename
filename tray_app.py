@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw
 import pystray
 
 import rename_watcher as watcher
+import updater
 
 
 def create_icon_image(color="#6ee7b7"):
@@ -53,6 +54,70 @@ def open_log_file():
             subprocess.Popen(["xdg-open", watcher.LOG_FILE])
         except Exception:
             pass
+
+
+def message_box(text: str, title: str = "AutoRename", yes_no: bool = False) -> bool:
+    """트레이 콜백 스레드에서도 안전하게 뜨는 윈도우 기본 메시지창. 예/아니오면 '예'일 때 True."""
+    import ctypes
+    MB_YESNO, MB_ICONINFO, MB_TOPMOST, MB_SETFOREGROUND, IDYES = 0x4, 0x40, 0x40000, 0x10000, 6
+    flags = MB_ICONINFO | MB_TOPMOST | MB_SETFOREGROUND | (MB_YESNO if yes_no else 0)
+    return ctypes.windll.user32.MessageBoxW(None, text, title, flags) == IDYES
+
+
+_update_lock = threading.Lock()
+
+
+def run_update_check(on_installing):
+    """업데이트 확인 → (새 버전이면) 다운로드·검증 → 조용히 설치. on_installing() 은 앱 종료 콜백."""
+    if not _update_lock.acquire(blocking=False):
+        return  # 이미 확인/다운로드 중
+    try:
+        current = updater.APP_VERSION
+        try:
+            info = updater.check_latest()
+        except Exception as e:
+            watcher.log(f"[업데이트 확인 실패] {e}")
+            message_box(f"업데이트 정보를 가져오지 못했습니다.\n인터넷 연결을 확인해 주세요.\n\n({e})")
+            return
+
+        if not info["newer"]:
+            message_box(f"최신 버전을 사용 중입니다. (v{current})")
+            return
+
+        if not getattr(sys, "frozen", False):
+            # 소스(.py)로 돌리는 경우엔 설치본을 깔면 안 된다 — 다른 위치에 exe 가 따로 생긴다.
+            message_box(f"새 버전 v{info['version']} 이 있습니다. (현재 v{current})\n\n"
+                        "소스로 실행 중이라 자동 설치는 하지 않습니다. git pull 로 받아 주세요.")
+            return
+
+        if not info["url"]:
+            message_box(f"새 버전 v{info['version']} 이 있지만 설치 파일이 아직 올라오지 않았습니다.\n"
+                        f"잠시 뒤 다시 시도하거나 아래에서 직접 받아 주세요.\n\n{updater.RELEASES_PAGE}")
+            return
+
+        size_mb = info["size"] / 1024 / 1024
+        if not message_box(
+            f"새 버전 v{info['version']} 이 있습니다. (현재 v{current})\n\n"
+            f"지금 받아서 설치할까요? (약 {size_mb:.0f}MB)\n"
+            "설치하는 동안 잠시 꺼졌다가 자동으로 다시 켜지고, 설정은 그대로 유지됩니다.",
+            yes_no=True,
+        ):
+            return
+
+        watcher.show_toast("업데이트 다운로드 중", f"v{info['version']} ({size_mb:.0f}MB)를 받고 있습니다…", accent="#6ee7b7")
+        watcher.log(f"[업데이트 다운로드] v{current} -> v{info['version']}")
+        try:
+            path = updater.download_installer(info)
+        except Exception as e:
+            watcher.log(f"[업데이트 다운로드 실패] {e}")
+            message_box(f"다운로드에 실패했습니다.\n\n{e}\n\n직접 받기: {updater.RELEASES_PAGE}")
+            return
+
+        watcher.log(f"[업데이트 설치 시작] {path}")
+        updater.launch_installer(path)
+        on_installing()
+    finally:
+        _update_lock.release()
 
 
 def show_settings_gui():
@@ -199,9 +264,14 @@ def show_settings_gui():
     ent_gemini_key.insert(0, config.get("gemini_api_key", ""))
 
     # Gemini 모델 버전 선택 (3.5는 최신이지만 수요 급증 시 503 오류 잦음 / 2.5는 안정적이나 2026-10-16 전체 종료 예정)
+    # 목록에 없는 값이 config 에 있으면 저장할 때 기본값으로 덮이므로, 쓸 만한 모델은 여기 다 올려 둔다.
     GEMINI_MODEL_LABELS = {
-        "gemini-3.5-flash": "Gemini 3.5 Flash (기본, 가끔 503 과부하 오류)",
-        "gemini-2.5-flash": "Gemini 2.5 Flash (2026-10-16 종료 예정, 신규 키는 404)",
+        "gemini-3.5-flash": "Gemini 3.5 Flash (기본)",
+        "gemini-3.6-flash": "Gemini 3.6 Flash",
+        "gemini-3.7-flash": "Gemini 3.7 Flash (최신급, 수요 몰리면 503)",
+        "gemini-3.8-flash": "Gemini 3.8 Flash (최신, 수요 몰리면 503)",
+        "gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite (가장 빠르고 가벼움)",
+        "gemini-2.5-flash": "Gemini 2.5 Flash (신규 키는 404 — 기존 사용자만)",
     }
     GEMINI_MODEL_LABELS_REV = {v: k for k, v in GEMINI_MODEL_LABELS.items()}
     tk.Label(fields_frame, text="Gemini 모델 :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=2, column=0, sticky="w", pady=6)
@@ -602,6 +672,14 @@ def main():
         watcher.log("[프로그램 종료]")
         icon.stop()
 
+    def on_check_update(icon, item):
+        def _exit_for_install():
+            # 설치 프로그램이 exe 를 덮어쓸 수 있게 스스로 비켜 준다(설치 후 자동 재실행됨).
+            watcher.log("[업데이트 설치를 위해 종료]")
+            icon.stop()
+            os._exit(0)
+        threading.Thread(target=run_update_check, args=(_exit_for_install,), daemon=True).start()
+
     def pause_label_text(item=None):
         return "감시 재개" if watcher.paused.is_set() else "감시 일시정지"
 
@@ -613,6 +691,7 @@ def main():
             pystray.MenuItem("지금 정리하기 (7일↑)", on_cleanup),
             pystray.MenuItem("환경 설정 및 추가 지침", on_open_settings),
             pystray.MenuItem("로그 보기", on_open_log),
+            pystray.MenuItem(f"업데이트 확인 (현재 v{updater.APP_VERSION})", on_check_update),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("종료", on_quit),
         )

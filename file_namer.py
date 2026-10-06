@@ -34,7 +34,10 @@ LOG_FILE_PATH = os.path.join(os.path.expanduser("~"), "rename_watcher.log")
 # 잦고, 2.5는 안정적이나 2026-10-16 전체 종료 예정이라 신규 키는 이미 404), 사용자가 상황에 따라 직접 바꿔 쓸 수
 # 있도록 config["gemini_model"]로 선택 가능하게 함(설정 GUI 드롭다운). DEFAULT_GEMINI_MODEL은 그 기본값이자
 # config에 값이 없을 때(구버전 config 하위호환) 쓰이는 폴백.
-GEMINI_MODEL_CHOICES = ("gemini-2.5-flash", "gemini-3.5-flash")
+GEMINI_MODEL_CHOICES = (
+    "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash",
+    "gemini-3.5-flash-lite", "gemini-2.5-flash",
+)
 # 2026-09-08 기본값을 2.5 → 3.5 로 올림. 2.5는 2026-10-16 전체 종료 예정이고 신규 발급 키로는 이미 404가
 # 떨어져서, 새로 설치하는 사람이 기본값 그대로 두면 아예 동작하지 않는 상태였다.
 # 기존 사용자의 config에는 이미 gemini_model 값이 들어 있으므로 영향받지 않는다(신규 설치에만 적용).

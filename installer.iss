@@ -5,7 +5,8 @@
 ; ============================================================
 
 #define MyAppName "AutoRename"
-#define MyAppVersion "1.1.1"
+; ⚠️ updater.py 의 APP_VERSION 과 반드시 같게 맞춘다
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "AutoRename"
 #define MyAppExeName "AutoRename.exe"
 
@@ -62,6 +63,22 @@ Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: au
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "설치 완료 후 바로 실행"; Flags: nowait postinstall skipifsilent
+; 트레이 「업데이트 확인」이 /SILENT 로 설치할 때는 위 항목이 건너뛰어지므로 여기서 다시 띄운다
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+// 트레이 앱(pystray)은 Restart Manager 의 종료 요청에 응답하지 않아 위 CloseApplications 만으로는
+// "모든 응용 프로그램을 자동으로 닫지 못했습니다" 창이 뜬다(2026-10-06 실측). 그래서 설치 직전에 직접 끈다.
+// 설정·로그는 홈 디렉터리에 즉시 저장되는 구조라 강제 종료해도 잃는 것이 없다.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+  Sleep(1000);  // 파일 잠금이 풀릴 시간
+  Result := '';
+end;
