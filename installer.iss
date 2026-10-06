@@ -1,12 +1,12 @@
 ﻿; ============================================================
 ; AutoRename - Inno Setup 설치 스크립트
 ; Inno Setup(https://jrsoftware.org/isinfo.php)으로 컴파일하세요.
-; 사전 준비: build_exe.bat 실행 -> dist\AutoRename.exe 생성 완료 상태여야 함.
+; 사전 준비: PyInstaller --onedir 빌드 -> dist\AutoRename\ 폴더(AutoRename.exe + _internal\) 생성 완료 상태여야 함.
 ; ============================================================
 
 #define MyAppName "AutoRename"
 ; ⚠️ updater.py 의 APP_VERSION 과 반드시 같게 맞춘다
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.3.1"
 #define MyAppPublisher "AutoRename"
 #define MyAppExeName "AutoRename.exe"
 
@@ -27,6 +27,9 @@ Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; 번들한 Python 3.14 는 Windows 10 이상 전용이다(python314.dll 이 Win7 에 없는 api-ms-win-core-path 를 쓰고,
+; UCRT 도 Win10 부터 기본 내장). 미만이면 실행 때 "Failed to load Python DLL" 로만 죽으므로 설치 단계에서 막고 이유를 보여 준다.
+MinVersion=10.0
 
 ; ── 업그레이드 설치 대응 ────────────────────────────────────────────────
 ; 트레이에서 실행 중이면 AutoRename.exe 가 잠겨 있어 덮어쓰기가 실패한다.
@@ -52,8 +55,15 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 Name: "autostart"; Description: "Windows 시작 시 자동으로 실행"; GroupDescription: "추가 옵션:"; Flags: checkedonce
 Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; GroupDescription: "추가 옵션:"; Flags: unchecked
 
+[InstallDelete]
+; 이전 버전의 라이브러리 폴더를 비우고 새로 깐다(빠진 파일이 남아 버전이 섞이는 것 방지).
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; v1.3.1 부터 --onedir 빌드. 종전 --onefile 은 실행할 때마다 %TEMP%\_MEI… 에 파이썬을 풀어 썼는데,
+; 백신이 그 폴더를 막거나 지우면 "Failed to load Python DLL" 로 아예 안 켜졌다(2026-10-06 배포처 PC 실측).
+; 설치 폴더에 미리 풀어 두면 그 단계가 없어지고 켜지는 속도도 빨라진다.
+Source: "dist\AutoRename\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

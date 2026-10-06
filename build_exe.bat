@@ -18,7 +18,8 @@ rmdir /s /q dist 2>nul
 del /q AutoRename.spec 2>nul
 
 echo [3/3] Building exe with PyInstaller...
-python -m PyInstaller --noconfirm --onefile --windowed --name "AutoRename" --icon "app_icon.ico" tray_app.py
+REM --onedir: do not unpack to %TEMP% on every launch (antivirus blocked it -> "Failed to load Python DLL")
+python -m PyInstaller --noconfirm --onedir --windowed --name "AutoRename" --icon "app_icon.ico" tray_app.py
 
 if errorlevel 1 (
     echo Build failed. Check the error message above.
@@ -28,7 +29,7 @@ if errorlevel 1 (
 
 echo.
 echo ============================================================
-echo Build complete: dist\AutoRename.exe
+echo Build complete: dist\AutoRename\ (AutoRename.exe + _internal)
 echo Next step: open installer.iss with Inno Setup and compile it.
 echo This will produce Output\AutoRenameSetup.exe
 echo ============================================================
