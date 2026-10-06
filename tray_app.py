@@ -263,7 +263,7 @@ def show_settings_gui():
     ent_gemini_key.grid(row=1, column=1, sticky="ew", padx=10, pady=6)
     ent_gemini_key.insert(0, config.get("gemini_api_key", ""))
 
-    # Gemini 모델 버전 선택 (3.5는 최신이지만 수요 급증 시 503 오류 잦음 / 2.5는 안정적이나 2026-10-16 전체 종료 예정)
+    # Gemini 모델 버전 선택 (무료 한도는 모델별 하루 20회 — 막히면 file_namer 가 다음 모델로 자동 전환 / 2.5는 신규 키 404)
     # 목록에 없는 값이 config 에 있으면 저장할 때 기본값으로 덮이므로, 쓸 만한 모델은 여기 다 올려 둔다.
     GEMINI_MODEL_LABELS = {
         "gemini-3.5-flash": "Gemini 3.5 Flash (기본)",
