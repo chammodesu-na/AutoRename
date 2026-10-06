@@ -287,9 +287,49 @@ def extract_pdf_preview(filepath: str, limit: int) -> str:
         text = "\n".join(text_parts).strip()
         if not text:
             return "(텍스트 추출 불가, 스캔본일 가능성)"
-        return _truncate(text, limit)
+        # 실제 페이지 수를 같이 실어 보낸다. 안 보내면 모델이 본문의 "(1면)", "(2면)" 같은
+        # 서식 표기를 세서 장수를 추측한다(국세 납부서 1페이지 → "2장"으로 나온 사례).
+        return pdf_page_count_note(doc.page_count) + "\n\n" + _truncate(text, limit)
     finally:
         doc.close()
+
+
+def pdf_page_count_note(page_count: int) -> str:
+    return (
+        f"[시스템이 PDF 파일에서 직접 읽은 실제 페이지 수: {page_count}]\n"
+        "장수·총페이지수가 필요하면 반드시 이 숫자를 쓰고, 본문의 '(1면)', '(2면)', 페이지 번호 등을 세어 다시 계산하지 마."
+    )
+
+
+def get_pdf_page_count(filepath: str) -> int | None:
+    """PDF 실제 페이지 수. 못 읽으면 None."""
+    def _count(tmp_path):
+        import fitz
+        doc = fitz.open(tmp_path)
+        try:
+            return doc.page_count
+        finally:
+            doc.close()
+    try:
+        n = _read_via_copy(filepath, _count)
+    except Exception:
+        return None
+    return n if isinstance(n, int) else None
+
+
+PAGE_SUFFIX_RE = re.compile(r"_(\d+)장(?=(\.pdf)?$)", re.IGNORECASE)
+
+
+def fix_pdf_page_suffix(name: str, page_count: int | None) -> str:
+    """
+    AI가 붙인 '_N장' 표기를 실제 페이지 수로 강제 보정한다(1페이지면 표기 제거).
+    이름 끝에 이미 '_N장'이 있을 때만 건드린다 — 장수 규칙을 안 쓰는 사용자 이름엔 영향 없음.
+    """
+    if not name or not page_count:
+        return name
+    if page_count == 1:
+        return PAGE_SUFFIX_RE.sub("", name)
+    return PAGE_SUFFIX_RE.sub(f"_{page_count}장", name)
 
 
 def extract_text_preview(filepath: str, limit: int) -> str:
@@ -371,8 +411,10 @@ def build_content_parts(filepath: str, ext: str, limit: int) -> tuple[list, str]
                 img_data = _read_via_copy(filepath, _render_first_page)
                 if isinstance(img_data, bytes):
                     base64_data = base64.b64encode(img_data).decode("utf-8")
+                    page_count = get_pdf_page_count(filepath)
+                    note = ("\n" + pdf_page_count_note(page_count)) if page_count else ""
                     return [
-                        {"text": "[PDF 텍스트가 추출되지 않아 첫 페이지를 렌더링한 이미지입니다. 이미지를 분석해 정답을 찾아주세요]"},
+                        {"text": "[PDF 텍스트가 추출되지 않아 첫 페이지를 렌더링한 이미지입니다. 이미지를 분석해 정답을 찾아주세요]" + note},
                         {"inline_data": {"mime_type": "image/png", "data": base64_data}},
                     ], "pdf-image"
             except Exception:
@@ -1080,6 +1122,10 @@ def analyze_file(filepath: str) -> dict | None:
         site = clean(parsed.get("site", ""))
         if summary:
             suggested_name = build_filename_from_format(filename_format, today, summary, site)
+
+    # 장수는 모델 판단에 맡기지 않고 실제 PDF 페이지 수로 마지막에 덮는다.
+    if suggested_name and ext in PDF_EXTS:
+        suggested_name = fix_pdf_page_suffix(suggested_name, get_pdf_page_count(filepath))
 
     # 사용자 정의 이동 규칙 매칭 결과 (없으면 None)
     raw_idx = parsed.get("matched_rule_index")

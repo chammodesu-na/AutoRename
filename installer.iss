@@ -5,7 +5,7 @@
 ; ============================================================
 
 #define MyAppName "AutoRename"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "AutoRename"
 #define MyAppExeName "AutoRename.exe"
 
