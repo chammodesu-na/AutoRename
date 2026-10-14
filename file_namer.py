@@ -1528,6 +1528,46 @@ def _free_gemini_stages(config: dict) -> list:
     return stages
 
 
+# ── 맥락 플러그인 (선택) ─────────────────────────────────────────────────────
+# config["context_plugin"] 에 파이썬 파일 경로를 적으면 그 파일의 get_context(filepath, config) -> str 를 불러,
+# 돌려준 글을 AI 에 「파일 맥락」으로 붙인다(예: 브라우저 기록에서 찾은 「어느 화면에서 받았나」).
+# 플러그인이 open_settings() 를 가지면 트레이 메뉴에 「맥락 플러그인 설정」이 생긴다.
+# 경로가 비었거나 파일이 없거나 오류가 나면 조용히 건너뛴다 — 이름짓기는 맥락 없이 계속한다.
+CONTEXT_MAX_CHARS = 1500
+_plugin_cache = {}
+
+
+def load_context_plugin(config: dict | None = None):
+    path = ((config if config is not None else load_config()).get("context_plugin") or "").strip()
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        mtime = os.path.getmtime(path)
+        hit = _plugin_cache.get(path)
+        if hit and hit[0] == mtime:
+            return hit[1]
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("autorename_context_plugin", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _plugin_cache[path] = (mtime, mod)
+        return mod
+    except Exception as e:
+        _log_error(f"[맥락 플러그인 로드 실패] {path}: {e}")
+        return None
+
+
+def get_file_context(filepath: str, config: dict) -> str:
+    mod = load_context_plugin(config)
+    if not mod or not hasattr(mod, "get_context"):
+        return ""
+    try:
+        return (mod.get_context(filepath, config) or "").strip()[:CONTEXT_MAX_CHARS]
+    except Exception as e:
+        _log_error(f"[맥락 플러그인 오류] {os.path.basename(filepath)}: {e}")
+        return ""
+
+
 def analyze_file(filepath: str) -> dict | None:
     """설정 파일에서 매번 동적으로 키와 추가 지침을 로드하여 가벼운 한도로 분석을 수행합니다."""
     config = load_config()
@@ -1586,6 +1626,14 @@ def analyze_file(filepath: str) -> dict | None:
         system_prompt += (
             f"\n\n[참고: 과거 사용자가 직접 수정했던 이름들에서 관찰된 경향]\n{pattern_summary}\n"
             "이 경향은 참고만 하고, 위의 사용자 정의 추가 지침이나 명백한 파일 내용과 충돌하면 그쪽을 우선해."
+        )
+
+    file_context = get_file_context(filepath, config)
+    if file_context:
+        system_prompt += (
+            f"\n\n[파일 맥락 — 이 파일을 받을 때의 상황 (사용자 PC 기록)]\n{file_context}\n"
+            "이 맥락은 어떤 지침에 해당하는지 고르거나 날짜·출처를 정할 때 참고해. "
+            "파일 내용과 어긋나면 파일 내용을 우선해."
         )
 
     # AI 순위대로 시도할 계획을 세운다. 각 단계: (라벨, 키, 공급자/모델, 호출함수, 한도키).

@@ -543,6 +543,8 @@ def show_settings_gui():
             row = ctk.CTkFrame(rules_box, fg_color="transparent", cursor="hand2")
             row.pack(fill="x", padx=(12, 4), pady=4)
             badge(row, str(i + 1)).pack(side="left", padx=(0, 10))
+            # 버튼을 글보다 먼저 pack — 글이 길면 나중에 넣은 버튼이 눌려 뭉개졌다(2026-10-14). ↑(순서 올리기)는 사용자 요청으로 뺐다.
+            button(row, "✕", lambda i=i: (rules_state.pop(i), render_rules()), "icon", width=34, height=40).pack(side="right")
             col = ctk.CTkFrame(row, fg_color="transparent", cursor="hand2")
             col.pack(side="left", fill="x", expand=True)
             l1 = label(col, first_line(r["when"], 40) or "(조건 없음)", 13, True)
@@ -551,13 +553,11 @@ def show_settings_gui():
             l2.pack(anchor="w")
             for wdg in (row, col, l1, l2):
                 wdg.bind("<Button-1>", lambda e, i=i: open_rule_dialog(i))
-            button(row, "✕", lambda i=i: (rules_state.pop(i), render_rules()), "icon", width=34, height=40).pack(side="right")
-            if i > 0:
-                button(row, "↑", lambda i=i: (rules_state.insert(i - 1, rules_state.pop(i)), render_rules()), "icon", width=34, height=40).pack(side="right")
             separator_line(rules_box)
         row = ctk.CTkFrame(rules_box, fg_color="transparent", cursor="hand2")
         row.pack(fill="x", padx=(12, 4), pady=4)
         badge(row, "—", strong=False).pack(side="left", padx=(0, 10))
+        button(row, "›", lambda: open_common_dialog(), "icon", width=34, height=40).pack(side="right")
         col = ctk.CTkFrame(row, fg_color="transparent", cursor="hand2")
         col.pack(side="left", fill="x", expand=True)
         l1 = label(col, "공통 (항상 적용)", 13, True)
@@ -566,7 +566,6 @@ def show_settings_gui():
         l2.pack(anchor="w")
         for wdg in (row, col, l1, l2):
             wdg.bind("<Button-1>", lambda e: open_common_dialog())
-        button(row, "›", lambda: open_common_dialog(), "icon", width=34, height=40).pack(side="right")
 
     # ---- 기본 파일명 형식 ----
     c2_title = "기본 파일명 형식"
@@ -590,6 +589,7 @@ def show_settings_gui():
                 separator_line(move_box)
             row = ctk.CTkFrame(move_box, fg_color="transparent", cursor="hand2")
             row.pack(fill="x", padx=(14, 4), pady=4)
+            button(row, "✕", lambda i=i: (move_state.pop(i), render_moves()), "icon", width=40, height=40).pack(side="right")
             col = ctk.CTkFrame(row, fg_color="transparent", cursor="hand2")
             col.pack(side="left", fill="x", expand=True)
             l1 = label(col, first_line(r.get("keyword", ""), 40), 13, True)
@@ -598,7 +598,6 @@ def show_settings_gui():
             l2.pack(anchor="w")
             for wdg in (row, col, l1, l2):
                 wdg.bind("<Button-1>", lambda e, i=i: open_move_dialog(i))
-            button(row, "✕", lambda i=i: (move_state.pop(i), render_moves()), "icon", width=40, height=40).pack(side="right")
 
     render_rules()
     button(c, "+  지침 추가", lambda: open_rule_dialog(None), "ghost", height=34).pack(anchor="w", pady=(8, 0))
@@ -1036,6 +1035,21 @@ def main():
         except Exception as e:
             watcher.log(f"[설정 창 실행 실패] {e}")
 
+    def on_open_plugin_settings(icon, item):
+        """맥락 플러그인(config["context_plugin"])의 자체 설정 창 — 플러그인이 open_settings() 를 가질 때만 메뉴에 보인다."""
+        try:
+            if getattr(sys, 'frozen', False):
+                subprocess.Popen([sys.executable, "--plugin-settings"])
+            else:
+                subprocess.Popen([sys.executable, __file__, "--plugin-settings"])
+        except Exception as e:
+            watcher.log(f"[맥락 플러그인 설정 창 실행 실패] {e}")
+
+    def has_plugin_settings(item=None):
+        from file_namer import load_context_plugin
+        plugin = load_context_plugin()
+        return bool(plugin and hasattr(plugin, "open_settings"))
+
     def on_quit(icon, item):
         watcher.log("[프로그램 종료]")
         icon.stop()
@@ -1058,6 +1072,7 @@ def main():
             pystray.MenuItem("에러 파일 재시도", on_retry_failed),
             pystray.MenuItem("지금 정리하기 (7일↑)", on_cleanup),
             pystray.MenuItem("환경 설정 및 추가 지침", on_open_settings),
+            pystray.MenuItem("맥락 플러그인 설정", on_open_plugin_settings, visible=has_plugin_settings),
             pystray.MenuItem("로그 보기", on_open_log),
             pystray.MenuItem("설정 파일 위치 열기", on_open_config_folder),
             pystray.MenuItem(f"업데이트 확인 (현재 v{updater.APP_VERSION})", on_check_update),
@@ -1088,5 +1103,10 @@ if __name__ == "__main__":
     # 실행 인자 확인을 통해 설정 창과 트레이 아이콘 분할 기동
     if len(sys.argv) > 1 and sys.argv[1] == "--settings":
         show_settings_gui()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--plugin-settings":
+        from file_namer import load_context_plugin
+        plugin = load_context_plugin()
+        if plugin and hasattr(plugin, "open_settings"):
+            plugin.open_settings()
     else:
         main()
