@@ -6,7 +6,7 @@
 
 #define MyAppName "AutoRename"
 ; ⚠️ updater.py 의 APP_VERSION 과 반드시 같게 맞춘다
-#define MyAppVersion "1.3.3"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "AutoRename"
 #define MyAppExeName "AutoRename.exe"
 
@@ -64,6 +64,8 @@ Type: filesandordirs; Name: "{app}\_internal"
 ; 백신이 그 폴더를 막거나 지우면 "Failed to load Python DLL" 로 아예 안 켜졌다(2026-10-06 배포처 PC 실측).
 ; 설치 폴더에 미리 풀어 두면 그 단계가 없어지고 켜지는 속도도 빨라진다.
 Source: "dist\AutoRename\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 2.0.0~ AI 에이전트가 설정 파일을 안전하게 고치도록 돕는 안내서
+Source: "AI_설정가이드.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

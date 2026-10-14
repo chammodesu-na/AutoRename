@@ -500,3 +500,15 @@ pythonw.exe tray\_app.py
 \- `_call_claude` 는 `content[0]["text"]` 를 가정하면 안 된다 — 최신 모델은 text 아닌 블록이 먼저 올 수 있어 `'text'` KeyError 로 "API 호출 실패" 가 찍혔다(HTTP 200, 키는 정상). text 블록을 골라 쓰도록 수정, 없으면 블록 종류·stop_reason 을 로그에 남긴다. 실측 비용 약 $0.03/파일(claude-sonnet-5).
 \- Claude 모델 선택 추가(2026-10-14): `config["claude_model"]` + 설정창 「Claude 모델」 드롭다운(Haiku 5.5 / Sonnet 5.5 / Sonnet 5(기본) / Opus 5.5). 4개 ID 모두 /v1/models 로 존재 확인.
 \- 설정창 개편(2026-10-14, v1.3.3): 탭 3개(일반/AI/규칙) + 하단 고정 저장·취소(Ctrl+S). AI 탭은 고른 공급자의 키·모델만 표시, 유료 키는 「고급 설정」 접기, API 키는 가림+「보기」. 저장 시 화면에 없는 설정 키도 보존(dict(config) 위에 update). 함정: ①vista 테마는 콤보박스 색 무시 → clam ②Text 기본 80자 폭이 창을 밀어냄 → width=1 + 스크롤바 먼저 pack ③숨은 탭 캔버스 창 폭은 같은 값 재지정이 무시됨 → 다른 값 넣고 after(1)로 원복.
+
+\## v2.0.0 (2026-10-14) — 설정 창 CustomTkinter 개편 + AI 순위 + 지침 칸 분리
+
+\- 시안: Claude 디자인 캔버스 「AutoRename 설정 창 시안」(일반/AI/규칙/지침 추가/이동 규칙 추가 5장). 색은 Claude 톤(크림 #F5F4EE, 테라코타 #B85A38), 다크 모드 자동.
+\- AI: `ai_chain`(1·2·3순위). 한도·과부하·시간초과면 다음 순위, 401 은 멈춤. 한도키에 키 끝 6자리. 구버전 칸에서 자동 마이그레이션(`get_ai_chain`) — 유료 공급자와 키가 어긋난 설정(openai 칸에 sk-ant 키)이 실제로 있어서 키 접두어로 공급자를 판정(`guess_provider`).
+\- 지침: `naming_rules`[{when,how}] + `common_rules`. AI 에 보낼 땐 `compose_user_rules` 가 「1번부터 처음 맞는 하나」 글로 합친다. 비어 있으면 옛 `user_rules` 그대로.
+\- 파일명: `{time}`·`{original}` 추가, `date_format` 6종, 빈 값 자리는 앞 구분자째 제거.
+\- 「AI로 다듬기」: `refine_text` — 저장된 1순위 키로 호출. JSON 출력 강제(안 하면 문자열 안 날 줄바꿈으로 깨진 JSON 이 와서 실패, 실측) + `strict=False`. 오늘 날짜를 알려야 예시가 옛 연도로 안 나온다.
+\- 엑셀: IBK 등 일부 xlsx 는 openpyxl 이 스타일시트(styleId)에서 통째로 실패 → `_extract_xlsx_preview_raw` 로 시트 XML 직접 읽기.
+\- 저장 시 구버전 칸(ai_provider·*_api_key·paid_*·user_rules)을 새 항목에서 채운다(1.3.x 호환).
+\- 빌드: `--collect-data customtkinter --add-data "app_icon.ico;."`(설정 창 아이콘). 설치본에 `AI_설정가이드.md` 포함, 트레이에 「설정 파일 위치 열기」.
+\- 함정: render_* 가 아래에서 정의되는 함수를 즉시 참조하면 NameError(free variable) → lambda 로 감싼다.

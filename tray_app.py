@@ -121,587 +121,810 @@ def run_update_check(on_installing):
 
 
 def show_settings_gui():
-    """독립된 프로세스로 실행되어 스레드 락 없이 안전하게 구동되는 환경설정 GUI 창
+    """독립된 프로세스로 실행되는 환경설정 창 (2.0.0 — CustomTkinter, Claude 톤 · iOS 설정 앱 스타일).
 
-    2026-10-14 개편: 한 장짜리 긴 스크롤 → 탭 3개(일반 / AI / 규칙) + 하단 고정 저장 버튼.
-    - AI 탭은 고른 공급자의 키·모델만 보인다(나머지 공급자 칸은 숨기되 값은 그대로 저장).
-    - 유료 키는 「고급 설정」 아래로 접고, API 키는 가려서 「보기」를 눌렀을 때만 보인다.
-    - 저장할 때 화면에 없는 설정 키(gemini_model_rotation 등)도 지우지 않고 그대로 둔다.
+    - 탭: 일반(감시 폴더·카운트다운) / AI(1·2·3순위) / 규칙(이름 짓는 지침·파일명 형식·자동 이동)
+    - 윈도우가 다크 모드면 다크로 그린다(set_appearance_mode("system")).
+    - 저장할 때 화면에 없는 설정 키도 지우지 않고, 구버전(1.3.x)이 읽는 옛 칸도 같이 채운다.
+    시안: Claude 디자인 캔버스 「AutoRename 설정 창 시안」(2026-10-14).
     """
+    import re
+    import datetime
+    import tkinter.font as tkfont
+    import customtkinter as ctk
     from file_namer import (
-        load_config, save_config, DEFAULT_FILENAME_FORMAT, AI_PROVIDERS, DEFAULT_GEMINI_MODEL,
-        DEFAULT_CLAUDE_MODEL, OPENAI_MODEL,
+        load_config, save_config, DEFAULT_FILENAME_FORMAT, DEFAULT_GEMINI_MODEL, DEFAULT_CLAUDE_MODEL,
+        OPENAI_MODEL, AI_CHAIN_MAX, DATE_FORMATS, DEFAULT_DATE_FORMAT, get_ai_chain, chain_to_legacy,
+        compose_user_rules, build_filename_from_format, guess_provider, default_model_for,
+        refine_text, RefineError,
     )
 
     config = load_config()
 
-    root = tk.Tk()
+    ctk.set_appearance_mode("system")
+    root = ctk.CTk()
     root.title("AutoRename 설정")
-    root.configure(bg="#1e1e22")
     root.attributes("-topmost", True)
 
-    # ---- 화면 크기에 맞춰 창 크기/위치를 동적으로 결정 ----
-    # 작은 화면(노트북)에서 작업표시줄까지 빼면 창이 화면 밖으로 밀려나던 문제가 있어 화면 크기 기준으로 제한한다.
-    desired_w, desired_h = 560, 620
-    sw = root.winfo_screenwidth()
-    sh = root.winfo_screenheight()
-    win_w = max(min(desired_w, sw - 80), 440)
-    win_h = max(min(desired_h, sh - 120), 420)
-    x = max((sw - win_w) // 2, 0)
-    y = max((sh - win_h) // 2, 0)
-    root.geometry(f"{win_w}x{win_h}+{x}+{y}")
-    root.resizable(True, True)
-    root.minsize(440, 420)
+    # ---- 색 (밝은, 어두운) ----
+    BG = ("#F5F4EE", "#1F1E1D")
+    CARD = ("#FFFFFF", "#2A2926")
+    BORDER = ("#E6E3D8", "#3A3935")
+    TEXT = ("#1F1E1D", "#F2F0E8")
+    SUB = ("#6B6962", "#A8A59C")
+    FIELD = ("#F7F6F1", "#232220")
+    SEG = ("#EAE7DD", "#33322E")
+    SEG_SEL = ("#FFFFFF", "#4A4843")
+    SEG_HOVER = ("#E0DCCF", "#3D3C37")
+    ACCENT = ("#B85A38", "#C96A47")
+    ACCENT_H = ("#9E4A2C", "#B85A38")
+    BADGE_BG = ("#F6E5DC", "#4A2E24")
+    BADGE_TX = ("#8F4426", "#F2B9A3")
+    WARN_BG, WARN_BD, WARN_TX = ("#FBF5E4", "#332C1C"), ("#EEDFB3", "#4D4122"), ("#7A5A0B", "#E8C46A")
+    ERR_BG, ERR_BD, ERR_TX = ("#FBECEA", "#3A2222"), ("#F1CFCB", "#5A2E2E"), ("#9E2F25", "#F29B9B")
+    SUG_BG, SUG_BD = ("#FBF1EB", "#33261F"), ("#F0DACD", "#4A2E24")
+    THUMB = ("#CFCABB", "#55534D")
+    root.configure(fg_color=BG)
 
-    # ---- 색·글꼴 ----
-    fg_mint = "#6ee7b7"
-    bg_dark = "#1e1e22"
-    bg_entry = "#2a2a2f"
-    bg_button = "#3a3a40"
-    fg_white = "#f2f2f2"
-    sub_color = "#9a9aa2"
-    DANGER_FG = "#ff8585"
+    # ---- 글꼴: Pretendard 가 깔려 있으면 그것, 없으면 맑은 고딕 ----
+    families = set(tkfont.families(root))
+    FAMILY = "Pretendard" if "Pretendard" in families else "Malgun Gothic"
 
-    header_font = ("Malgun Gothic", 14, "bold")
-    label_font = ("Malgun Gothic", 10, "bold")
-    section_font = ("Malgun Gothic", 10, "bold")
-    desc_font = ("Malgun Gothic", 8)
-    body_font = ("Malgun Gothic", 10)
+    def F(size=13, bold=False):
+        return ctk.CTkFont(family=FAMILY, size=size, weight="bold" if bold else "normal")
 
-    # ---- ttk 스타일 ----
-    # 윈도우 기본 테마(vista)는 콤보박스 fieldbackground 를 무시해서 흰 바탕에 흰 글씨(#f2f2f2)가 되어
-    # 포커스를 잃으면 글자가 거의 안 보였다(2026-10-14). clam 은 색 지정이 먹으므로 이걸 쓰고,
-    # readonly·focus 상태별 색까지 고정한다.
-    style = ttk.Style()
-    style.theme_use("clam")
-    style.configure(
-        "TCombobox", fieldbackground=bg_entry, background=bg_button, foreground=fg_white,
-        arrowcolor=fg_white, bordercolor=bg_button, lightcolor=bg_entry, darkcolor=bg_entry,
-        selectbackground=bg_entry, selectforeground=fg_white, padding=4,
-    )
-    style.map(
-        "TCombobox",
-        fieldbackground=[("readonly", bg_entry), ("disabled", bg_dark)],
-        foreground=[("readonly", fg_white), ("disabled", sub_color)],
-        selectbackground=[("readonly", bg_entry)],
-        selectforeground=[("readonly", fg_white)],
-        background=[("active", "#4a4a52"), ("pressed", "#4a4a52")],
-        bordercolor=[("focus", fg_mint)],
-    )
-    # 펼친 목록(popdown)은 tk Listbox 라 option DB 로 색을 준다
-    root.option_add("*TCombobox*Listbox.background", bg_entry)
-    root.option_add("*TCombobox*Listbox.foreground", fg_white)
-    root.option_add("*TCombobox*Listbox.selectBackground", fg_mint)
-    root.option_add("*TCombobox*Listbox.selectForeground", bg_dark)
-    root.option_add("*TCombobox*Listbox.font", body_font)
+    # ---- 창 크기 ----
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    win_w = max(min(580, sw - 80), 460)
+    win_h = max(min(780, sh - 100), 520)
+    root.geometry(f"{win_w}x{win_h}+{max((sw - win_w) // 2, 0)}+{max((sh - win_h) // 2, 0)}")
+    root.minsize(460, 520)
 
-    # clam 은 탭 본문 둘레에 밝은 테두리를 그리므로 테두리 색을 전부 배경색으로 지운다
-    style.configure(
-        "TNotebook", background=bg_dark, borderwidth=0, tabmargins=(24, 0, 24, 0),
-        bordercolor=bg_dark, lightcolor=bg_dark, darkcolor=bg_dark,
-    )
-    style.configure(
-        "TNotebook.Tab", background=bg_entry, foreground=sub_color, padding=(18, 7),
-        borderwidth=0, font=label_font, lightcolor=bg_entry, bordercolor=bg_dark,
-    )
-    style.map(
-        "TNotebook.Tab",
-        background=[("selected", bg_dark), ("active", "#34343a")],
-        foreground=[("selected", fg_mint), ("active", fg_white)],
-        lightcolor=[("selected", bg_dark)],
-    )
+    # CTk 는 창 아이콘을 자기 로고로 바꾸므로 그 뒤에 앱 아이콘으로 덮는다
+    def _set_icon():
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        ico = os.path.join(base, "app_icon.ico")
+        if os.path.exists(ico):
+            try:
+                root.iconbitmap(ico)
+            except Exception:
+                pass
+    root.after(300, _set_icon)
 
-    # ---- 공통 위젯 도우미 ----
-    def flat_button(parent, text, command, fg=fg_white, primary=False, **kw):
-        if primary:
-            return tk.Button(
-                parent, text=text, command=command, bg=fg_mint, fg=bg_dark,
-                font=("Malgun Gothic", 10, "bold"), relief="flat", cursor="hand2",
-                activebackground="#58d0a3", activeforeground=bg_dark, padx=18, pady=6, **kw,
-            )
-        return tk.Button(
-            parent, text=text, command=command, bg=bg_button, fg=fg, relief="flat", cursor="hand2",
-            activebackground=bg_entry, activeforeground=fg, padx=10, pady=3, **kw,
-        )
+    # 창 폭에 맞춰 줄바꿈되는 안내문들
+    wrap_labels = []
 
-    def flat_entry(parent, **kw):
-        return tk.Entry(
-            parent, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat",
-            font=body_font, highlightthickness=1, highlightbackground=bg_button,
-            highlightcolor=fg_mint, **kw,
-        )
+    def on_root_resize(_e=None):
+        width = max(root.winfo_width() - 130, 240)
+        for lbl, extra in wrap_labels:
+            try:
+                lbl.configure(wraplength=width - extra)
+            except Exception:
+                pass
 
-    def wrap_label(parent, text, fg=sub_color, font=desc_font):
-        """창 폭에 맞춰 자동 줄바꿈되는 안내문. (wraplength=0 이면 줄바꿈 없이 잘려 나간다)"""
-        lbl = tk.Label(parent, text=text, fg=fg, bg=bg_dark, font=font, justify="left", anchor="w")
+    root.bind("<Configure>", lambda e: on_root_resize() if e.widget is root else None, add="+")
 
-        def _rewrap(event):
-            width = max(event.width - 4, 120)
-            # 같은 값을 다시 넣으면 <Configure>가 또 돌아 무한 반복이 되므로 바뀔 때만 적용한다
-            if lbl.cget("wraplength") != width:
-                lbl.configure(wraplength=width)
-
-        lbl.bind("<Configure>", _rewrap)
+    # ---- 공통 위젯 ----
+    def label(parent, text, size=13, bold=False, color=TEXT, wrap_extra=None, **kw):
+        lbl = ctk.CTkLabel(parent, text=text, font=F(size, bold), text_color=color, anchor="w", justify="left", **kw)
+        if wrap_extra is not None:
+            wrap_labels.append((lbl, wrap_extra))
+            lbl.configure(wraplength=max(win_w - 130 - wrap_extra, 240))
         return lbl
 
-    def section(parent, title, desc=None, top=18):
-        tk.Label(parent, text=title, fg=fg_mint, bg=bg_dark, font=section_font).pack(anchor="w", pady=(top, 4))
+    def card(parent, title=None, desc=None):
+        fr = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
+        fr.pack(fill="x", pady=(0, 12))
+        inner = ctk.CTkFrame(fr, fg_color="transparent")
+        inner.pack(fill="x", padx=18, pady=16)
+        if title:
+            label(inner, title, 15, True).pack(anchor="w")
         if desc:
-            wrap_label(parent, desc).pack(anchor="w", fill="x", pady=(0, 6))
+            label(inner, desc, 12, color=SUB, wrap_extra=40).pack(anchor="w", fill="x", pady=(2, 8))
+        return inner
 
-    def secret_entry(parent, value):
-        """API 키 입력칸. 기본은 가려 두고 「보기」를 누르면 보인다."""
-        row = tk.Frame(parent, bg=bg_dark)
-        ent = flat_entry(row, show="●")
-        ent.pack(side="left", fill="x", expand=True, ipady=3)
-        ent.insert(0, value or "")
+    def button(parent, text, command, kind="ghost", width=0, height=36, **kw):
+        styles = {
+            "primary": dict(fg_color=ACCENT, hover_color=ACCENT_H, text_color="#FFFFFF", font=F(14, True)),
+            "secondary": dict(fg_color=SEG, hover_color=SEG_HOVER, text_color=TEXT, font=F(14)),
+            "ghost": dict(fg_color="transparent", hover_color=SEG, text_color=ACCENT, font=F(13, True)),
+            "icon": dict(fg_color="transparent", hover_color=SEG, text_color=SUB, font=F(14)),
+            "field": dict(fg_color=FIELD, hover_color=SEG, text_color=TEXT, font=F(13),
+                          border_width=1, border_color=BORDER),
+            "chip": dict(fg_color=CARD, hover_color=SEG, text_color=TEXT, font=F(12),
+                         border_width=1, border_color=BORDER, corner_radius=16),
+        }
+        opts = {"corner_radius": 10, **styles[kind], **kw}
+        return ctk.CTkButton(parent, text=text, command=command, width=width, height=height, **opts)
+
+    def entry(parent, value="", show=None, **kw):
+        e = ctk.CTkEntry(parent, fg_color=FIELD, border_color=BORDER, border_width=1, text_color=TEXT,
+                         corner_radius=10, height=38, font=F(13), show=show, **kw)
+        if value:
+            e.insert(0, value)
+        return e
+
+    def option(parent, values, current, command=None, width=140):
+        om = ctk.CTkOptionMenu(
+            parent, values=values, command=command, width=width, height=38, corner_radius=10,
+            fg_color=FIELD, button_color=FIELD, button_hover_color=SEG, text_color=TEXT,
+            dropdown_fg_color=CARD, dropdown_text_color=TEXT, dropdown_hover_color=SEG,
+            font=F(13), dropdown_font=F(13), dynamic_resizing=False,
+        )
+        om.set(current)
+        return om
+
+    def segmented(parent, values, current, command, height=34, size=13):
+        sb = ctk.CTkSegmentedButton(
+            parent, values=values, command=command, height=height, corner_radius=10, border_width=3,
+            fg_color=SEG, selected_color=SEG_SEL, selected_hover_color=SEG_SEL,
+            unselected_color=SEG, unselected_hover_color=SEG_HOVER, text_color=TEXT, font=F(size, True),
+        )
+        sb.set(current)
+        return sb
+
+    def textbox(parent, value="", height=90):
+        tb = ctk.CTkTextbox(parent, fg_color=FIELD, border_color=BORDER, border_width=1, text_color=TEXT,
+                            corner_radius=10, height=height, font=F(13), wrap="word",
+                            scrollbar_button_color=THUMB, scrollbar_button_hover_color=SUB)
+        if value:
+            tb.insert("1.0", value)
+        return tb
+
+    def list_box(parent):
+        """행 목록을 담는 옅은 둥근 상자"""
+        fr = ctk.CTkFrame(parent, fg_color=FIELD, corner_radius=12)
+        fr.pack(fill="x")
+        return fr
+
+    def badge(parent, text, strong=True):
+        return ctk.CTkLabel(parent, text=text, width=24, height=24, corner_radius=12, font=F(11, True),
+                            fg_color=BADGE_BG if strong else SEG, text_color=BADGE_TX if strong else SUB)
+
+    def separator_line(parent):
+        ctk.CTkFrame(parent, height=1, fg_color=BORDER).pack(fill="x", padx=10)
+
+    # ---- 레이아웃: 헤더 / 탭 / 본문 / 하단 ----
+    header = ctk.CTkFrame(root, fg_color="transparent")
+    header.pack(fill="x", padx=28, pady=(22, 12))
+    label(header, "AutoRename", 24, True).pack(side="left")
+    ctk.CTkLabel(header, text=f"v{updater.APP_VERSION}", font=F(12), text_color=SUB, fg_color=SEG,
+                 corner_radius=10, height=24, width=60).pack(side="left", padx=(10, 0), pady=(4, 0))
+
+    bottom = ctk.CTkFrame(root, fg_color="transparent")
+    bottom.pack(side="bottom", fill="x")
+    ctk.CTkFrame(bottom, height=1, fg_color=BORDER).pack(fill="x")
+    bottom_inner = ctk.CTkFrame(bottom, fg_color="transparent")
+    bottom_inner.pack(fill="x", padx=28, pady=(14, 18))
+
+    pages = {}
+    tab_names = ["일반", "AI", "규칙"]
+
+    def show_tab(name):
+        for n, pg in pages.items():
+            if n == name:
+                pg.pack(fill="both", expand=True, padx=(28, 14), pady=(0, 6))
+            else:
+                pg.pack_forget()
+
+    tabs = segmented(root, tab_names, "일반", show_tab, height=38, size=14)
+    tabs.pack(fill="x", padx=28, pady=(0, 14))
+
+    for n in tab_names:
+        pages[n] = ctk.CTkScrollableFrame(
+            root, fg_color="transparent", scrollbar_button_color=THUMB, scrollbar_button_hover_color=SUB,
+        )
+
+    # =========================================================================
+    # 탭 1. 일반
+    # =========================================================================
+    pg = pages["일반"]
+    folders_state = list(config.get("watch_folders") or ([config["watch_folder"]] if config.get("watch_folder") else []))
+
+    c = card(pg, "감시 폴더", "새 파일이 들어오면 AI가 보고 이름을 바꿉니다.")
+    folders_box = list_box(c)
+
+    def render_folders():
+        for w in folders_box.winfo_children():
+            w.destroy()
+        if not folders_state:
+            label(folders_box, "감시할 폴더가 없어요. 하나 이상 추가해 주세요.", 12, color=SUB).pack(anchor="w", padx=14, pady=12)
+        for i, path in enumerate(folders_state):
+            if i:
+                separator_line(folders_box)
+            row = ctk.CTkFrame(folders_box, fg_color="transparent")
+            row.pack(fill="x", padx=(14, 4), pady=2)
+            label(row, "▸", 13, color=ACCENT).pack(side="left", padx=(0, 8))
+            label(row, path, 13).pack(side="left", fill="x", expand=True)
+            button(row, "✕", lambda p=path: (folders_state.remove(p), render_folders()), "icon", width=40, height=40).pack(side="right")
+
+    def add_folder():
+        sel = filedialog.askdirectory(parent=root)
+        if sel and sel not in folders_state:
+            folders_state.append(sel)
+            render_folders()
+
+    render_folders()
+    button(c, "+  폴더 추가", add_folder, "ghost", height=34).pack(anchor="w", pady=(8, 0))
+
+    c = card(pg)
+    row = ctk.CTkFrame(c, fg_color="transparent")
+    row.pack(fill="x")
+    txt = ctk.CTkFrame(row, fg_color="transparent")
+    txt.pack(side="left", fill="x", expand=True)
+    label(txt, "카운트다운", 15, True).pack(anchor="w")
+    label(txt, "이름 바꾸기 전에 알림을 띄우고 기다립니다. 그동안 취소할 수 있어요.", 12, color=SUB, wrap_extra=140).pack(anchor="w", fill="x")
+    label(row, "초", 13, color=SUB).pack(side="right", padx=(6, 0))
+    ent_sec = entry(row, str(config.get("countdown_seconds", 3)), width=60, justify="center")
+    ent_sec.pack(side="right")
+
+    # =========================================================================
+    # 탭 2. AI — 1·2·3순위
+    # =========================================================================
+    pg = pages["AI"]
+    PROVIDER_UI = {"gemini": "Gemini", "openai": "GPT", "claude": "Claude"}
+    PROVIDER_UI_REV = {v: k for k, v in PROVIDER_UI.items()}
+    MODEL_LABELS = {
+        "gemini": {
+            "gemini-3.5-flash": "Gemini 3.5 Flash (기본)",
+            "gemini-3.6-flash": "Gemini 3.6 Flash",
+            "gemini-3.7-flash": "Gemini 3.7 Flash · 최신급",
+            "gemini-3.8-flash": "Gemini 3.8 Flash · 최신",
+            "gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite · 가장 가벼움",
+            "gemini-2.5-flash": "Gemini 2.5 Flash · 기존 키만",
+        },
+        "claude": {
+            "claude-haiku-5-5": "Claude Haiku 5.5 · 가장 싸고 빠름",
+            "claude-sonnet-5-5": "Claude Sonnet 5.5 · 최신 Sonnet",
+            "claude-sonnet-5": "Claude Sonnet 5",
+            "claude-opus-5-5": "Claude Opus 5.5 · 가장 똑똑함, 비쌈",
+        },
+    }
+
+    label(pg, "위 순위가 한도·과부하로 막히면 다음 순위로 넘어갑니다.", 12, color=SUB, wrap_extra=0).pack(anchor="w", fill="x", padx=2, pady=(0, 10))
+
+    chain_state = [dict(e) for e in get_ai_chain(config)] or [{"provider": "claude", "api_key": "", "model": DEFAULT_CLAUDE_MODEL}]
+    chain_widgets = []
+    chain_host = ctk.CTkFrame(pg, fg_color="transparent")
+    chain_host.pack(fill="x")
+    add_rank_btn = button(pg, "", lambda: None, "field", height=46, corner_radius=14, text_color=ACCENT, font=F(14, True))
+    rotation_var = ctk.BooleanVar(value=bool(config.get("gemini_model_rotation", True)))
+    rotation_card = ctk.CTkFrame(pg, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
+    rot_inner = ctk.CTkFrame(rotation_card, fg_color="transparent")
+    rot_inner.pack(fill="x", padx=18, pady=14)
+    ctk.CTkSwitch(rot_inner, text="Gemini 한도에 막히면 다른 Gemini 모델로 자동 전환", variable=rotation_var,
+                  font=F(13), text_color=TEXT, progress_color=ACCENT, button_color="#FFFFFF",
+                  button_hover_color="#F2F0E8", fg_color=SEG, switch_width=44, switch_height=24).pack(anchor="w")
+
+    def collect_chain():
+        for st, w in zip(chain_state, chain_widgets):
+            st["api_key"] = w["key"].get().strip()
+            if w.get("model"):
+                labels = MODEL_LABELS[st["provider"]]
+                st["model"] = {v: k for k, v in labels.items()}.get(w["model"].get(), st["model"])
+
+    def render_chain():
+        for w in chain_host.winfo_children():
+            w.destroy()
+        chain_widgets.clear()
+        for idx, st in enumerate(chain_state):
+            chain_widgets.append(build_rank_card(idx, st))
+        # 순서: 순위 카드들(chain_host) → 「+ N순위 추가」 → Gemini 자동 전환. 매번 다시 pack 해서 순서를 지킨다.
+        add_rank_btn.pack_forget()
+        rotation_card.pack_forget()
+        n = len(chain_state)
+        if n < AI_CHAIN_MAX:
+            add_rank_btn.configure(text=f"+  {n + 1}순위 추가", command=add_rank)
+            add_rank_btn.pack(fill="x", pady=(0, 12))
+        if any(s["provider"] == "gemini" for s in chain_state):
+            rotation_card.pack(fill="x", pady=(0, 12))
+
+    def change_provider(idx, ui_name):
+        collect_chain()
+        st = chain_state[idx]
+        new = PROVIDER_UI_REV[ui_name]
+        if new != st["provider"]:
+            st["provider"] = new
+            st["model"] = default_model_for(new)
+        render_chain()
+
+    def move_up(idx):
+        collect_chain()
+        chain_state[idx - 1], chain_state[idx] = chain_state[idx], chain_state[idx - 1]
+        render_chain()
+
+    def remove_rank(idx):
+        collect_chain()
+        del chain_state[idx]
+        render_chain()
+
+    def add_rank():
+        collect_chain()
+        chain_state.append({"provider": "gemini", "api_key": "", "model": DEFAULT_GEMINI_MODEL})
+        render_chain()
+
+    def build_rank_card(idx, st):
+        fr = ctk.CTkFrame(chain_host, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
+        fr.pack(fill="x", pady=(0, 12))
+        inner = ctk.CTkFrame(fr, fg_color="transparent")
+        inner.pack(fill="x", padx=18, pady=14)
+
+        top = ctk.CTkFrame(inner, fg_color="transparent")
+        top.pack(fill="x")
+        ctk.CTkLabel(top, text=f"{idx + 1}순위", height=24, corner_radius=12, font=F(12, True), width=58,
+                     fg_color=BADGE_BG if idx == 0 else SEG, text_color=BADGE_TX if idx == 0 else SUB).pack(side="left")
+        if len(chain_state) > 1:
+            button(top, "✕", lambda: remove_rank(idx), "icon", width=36, height=32).pack(side="right")
+        if idx > 0:
+            button(top, "↑", lambda: move_up(idx), "icon", width=36, height=32).pack(side="right")
+
+        seg = segmented(inner, list(PROVIDER_UI.values()), PROVIDER_UI[st["provider"]],
+                        lambda v: change_provider(idx, v), height=32, size=13)
+        seg.pack(fill="x", pady=(10, 10))
+
+        grid = ctk.CTkFrame(inner, fg_color="transparent")
+        grid.pack(fill="x")
+        grid.grid_columnconfigure(1, weight=1)
+        label(grid, "API 키", 12, color=SUB).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        key_row = ctk.CTkFrame(grid, fg_color="transparent")
+        key_row.grid(row=0, column=1, sticky="ew")
+        ent = entry(key_row, st.get("api_key", ""), show="●")
+        ent.pack(side="left", fill="x", expand=True)
 
         def toggle():
             hidden = ent.cget("show") != ""
             ent.configure(show="" if hidden else "●")
-            btn.configure(text="숨기기" if hidden else "보기")
+            eye.configure(text="숨김" if hidden else "보기")
 
-        btn = flat_button(row, "보기", toggle, width=5)
-        btn.pack(side="left", padx=(6, 0))
-        return row, ent
+        eye = button(key_row, "보기", toggle, "field", width=52, height=38)
+        eye.pack(side="left", padx=(6, 0))
 
-    def make_listbox(parent, height=5):
-        frame = tk.Frame(parent, bg=bg_dark)
-        lst = tk.Listbox(
-            frame, bg=bg_entry, fg=fg_white, relief="flat", font=body_font,
-            selectbackground=fg_mint, selectforeground=bg_dark,
-            highlightthickness=1, highlightbackground=bg_button, highlightcolor=fg_mint,
-            height=height, activestyle="none", selectmode="extended",
-        )
-        lst.pack(side="left", fill="both", expand=True)
-        sb = tk.Scrollbar(frame, orient="vertical", command=lst.yview)
-        sb.pack(side="right", fill="y")
-        lst.configure(yscrollcommand=sb.set)
-        return frame, lst
+        warn = label(grid, "", 11, color=ERR_TX)
 
-    # ---- 레이아웃: 헤더 / 탭 / 하단 고정 버튼줄 ----
-    header = tk.Frame(root, bg=bg_dark)
-    header.pack(side="top", fill="x", padx=24, pady=(16, 10))
-    tk.Label(header, text="AutoRename 설정", fg=fg_mint, bg=bg_dark, font=header_font).pack(side="left")
-    tk.Label(header, text=f"v{updater.APP_VERSION}", fg=sub_color, bg=bg_dark, font=desc_font).pack(side="left", padx=(8, 0), pady=(6, 0))
-
-    bottom = tk.Frame(root, bg=bg_entry)
-    bottom.pack(side="bottom", fill="x")
-
-    nb = ttk.Notebook(root)
-    nb.pack(side="top", fill="both", expand=True)
-
-    # 탭마다 스크롤되는 페이지. 내용이 창보다 짧으면 스크롤바를 숨긴다.
-    page_canvases = []
-    page_syncs = []
-    # 탭을 바꾸면 그 탭이 처음 제 크기를 갖게 되므로 폭·스크롤바를 다시 맞춘다
-    nb.bind("<<NotebookTabChanged>>", lambda e: root.after_idle(lambda: [s() for s in page_syncs]))
-
-    def make_page(title):
-        page = tk.Frame(nb, bg=bg_dark)
-        cv = tk.Canvas(page, bg=bg_dark, highlightthickness=0)
-        sb = tk.Scrollbar(page, orient="vertical", command=cv.yview)
-        cv.configure(yscrollcommand=sb.set)
-        cv.pack(side="left", fill="both", expand=True)
-        inner = tk.Frame(cv, bg=bg_dark)
-        body = tk.Frame(inner, bg=bg_dark)
-        body.pack(fill="both", expand=True, padx=24, pady=(4, 16))
-        win = cv.create_window((0, 0), window=inner, anchor="nw")
-
-        # 폭 맞추기와 스크롤바 판단을 나눈다. 프레임 <Configure> 에서 폭까지 건드리면 폭 지정이 먹지 않았다
-        # (실측: 캔버스 항목 폭 539 인데 프레임은 요청폭 707 그대로 → 「규칙」 탭 오른쪽이 잘림).
-        # 또 탭이 숨어 있던 동안 프레임이 요청폭으로 커지면, 같은 폭 값을 다시 넣어도 Tk 가 무시한다.
-        # 그럴 땐 다른 값을 한 번 넣고 다음 이벤트 때 원래 값을 넣어야 다시 적용된다(같은 호출 안에서 두 번 넣으면 소용없음).
-        def _fit_width(_event=None):
-            cw = cv.winfo_width()
-            if cw <= 1:
-                return
-            cv.itemconfig(win, width=cw)
-            if inner.winfo_width() not in (cw, 1):
-                cv.itemconfig(win, width=cw - 1)
-                root.after(1, lambda: cv.itemconfig(win, width=cv.winfo_width()))
-
-        def _sync_scroll(_event=None):
-            # 숨은 탭은 높이가 1px 이라 판단하면 안 된다(스크롤바가 괜히 붙는다)
-            ch = cv.winfo_height()
-            if ch <= 1:
-                return
-            cv.configure(scrollregion=cv.bbox("all"))
-            needs = inner.winfo_reqheight() > ch + 1
-            if needs and not sb.winfo_ismapped():
-                sb.pack(side="right", fill="y")
-            elif not needs and sb.winfo_ismapped():
-                sb.pack_forget()
-                cv.yview_moveto(0)
-
-        inner.bind("<Configure>", _sync_scroll)
-        cv.bind("<Configure>", lambda e: (_fit_width(), _sync_scroll()))
-        page_syncs.append(lambda: (_fit_width(), _sync_scroll()))
-        nb.add(page, text=title)
-        page_canvases.append((cv, inner))
-        return body
-
-    def on_mousewheel(event):
-        # 지침 입력칸·목록 위에서는 그 위젯이 스스로 스크롤하게 둔다
-        if isinstance(event.widget, (tk.Text, tk.Listbox)):
-            return
-        try:
-            cv, inner = page_canvases[nb.index("current")]
-        except Exception:
-            return
-        if inner.winfo_reqheight() > cv.winfo_height():
-            cv.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    root.bind_all("<MouseWheel>", on_mousewheel)
-
-    def on_close():
-        root.unbind_all("<MouseWheel>")
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_close)
-
-    # =========================================================================
-    # 탭 1. 일반 — 감시 폴더, 카운트다운
-    # =========================================================================
-    tab_general = make_page("  일반  ")
-
-    section(tab_general, "감시 대상 폴더", "이 폴더들에 새 파일이 들어오면 AI 가 보고 이름을 바꿉니다. 여러 개 넣을 수 있습니다.", top=10)
-    folders_list_frame, lst_folders = make_listbox(tab_general, height=6)
-    folders_list_frame.pack(fill="x")
-
-    existing_folders = config.get("watch_folders")
-    if not existing_folders:
-        legacy = config.get("watch_folder")
-        existing_folders = [legacy] if legacy else []
-    for f in existing_folders:
-        lst_folders.insert("end", f)
-
-    def add_folder():
-        selected = filedialog.askdirectory(parent=root)
-        if selected and selected not in lst_folders.get(0, "end"):
-            lst_folders.insert("end", selected)
-
-    def remove_selected_folder():
-        for idx in reversed(lst_folders.curselection()):
-            lst_folders.delete(idx)
-
-    folder_btn_row = tk.Frame(tab_general, bg=bg_dark)
-    folder_btn_row.pack(fill="x", pady=(6, 0))
-    flat_button(folder_btn_row, "+ 폴더 추가", add_folder).pack(side="left")
-    flat_button(folder_btn_row, "선택 삭제", remove_selected_folder, fg=DANGER_FG).pack(side="left", padx=(6, 0))
-
-    section(tab_general, "카운트다운 (초)", "이름을 바꾸기 전에 알림을 띄우고 기다리는 시간입니다. 그동안 취소할 수 있습니다.")
-    ent_sec = flat_entry(tab_general, width=8)
-    ent_sec.pack(anchor="w", ipady=3)
-    ent_sec.insert(0, str(config.get("countdown_seconds", 3)))
-
-    # =========================================================================
-    # 탭 2. AI — 공급자, (고른 공급자의) 키·모델, 고급: 유료 키
-    # =========================================================================
-    tab_ai = make_page("  AI  ")
-
-    PROVIDER_LABELS = {"gemini": "Google Gemini", "openai": "OpenAI (GPT)", "claude": "Anthropic (Claude)"}
-    PROVIDER_LABELS_REV = {v: k for k, v in PROVIDER_LABELS.items()}
-
-    # 목록에 없는 값이 config 에 있으면 저장할 때 기본값으로 덮이므로, 쓸 만한 모델은 여기 다 올려 둔다.
-    GEMINI_MODEL_LABELS = {
-        "gemini-3.5-flash": "Gemini 3.5 Flash (기본)",
-        "gemini-3.6-flash": "Gemini 3.6 Flash",
-        "gemini-3.7-flash": "Gemini 3.7 Flash (최신급, 수요 몰리면 503)",
-        "gemini-3.8-flash": "Gemini 3.8 Flash (최신, 수요 몰리면 503)",
-        "gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite (가장 빠르고 가벼움)",
-        "gemini-2.5-flash": "Gemini 2.5 Flash (신규 키는 404 — 기존 사용자만)",
-    }
-    GEMINI_MODEL_LABELS_REV = {v: k for k, v in GEMINI_MODEL_LABELS.items()}
-    CLAUDE_MODEL_LABELS = {
-        "claude-haiku-5-5": "Claude Haiku 5.5 (가장 싸고 빠름)",
-        "claude-sonnet-5-5": "Claude Sonnet 5.5 (최신 Sonnet)",
-        "claude-sonnet-5": "Claude Sonnet 5 (기본)",
-        "claude-opus-5-5": "Claude Opus 5.5 (가장 똑똑함, 비쌈)",
-    }
-    CLAUDE_MODEL_LABELS_REV = {v: k for k, v in CLAUDE_MODEL_LABELS.items()}
-
-    section(tab_ai, "AI 공급자", "파일 이름을 지을 AI 를 고릅니다. 고른 공급자의 키와 모델만 아래에 보입니다.", top=10)
-    cmb_provider = ttk.Combobox(tab_ai, values=list(PROVIDER_LABELS.values()), state="readonly")
-    current_provider = config.get("ai_provider", "gemini")
-    if current_provider not in AI_PROVIDERS:
-        current_provider = "gemini"
-    cmb_provider.set(PROVIDER_LABELS[current_provider])
-    cmb_provider.pack(fill="x")
-
-    # 공급자별 칸 묶음 — 고른 것만 보이고, 나머지도 값은 그대로 들고 있다가 같이 저장된다.
-    provider_host = tk.Frame(tab_ai, bg=bg_dark)
-    provider_host.pack(fill="x")
-    provider_frames = {}
-
-    def provider_block(key):
-        fr = tk.Frame(provider_host, bg=bg_dark)
-        provider_frames[key] = fr
-        return fr
-
-    def field_label(parent, text):
-        tk.Label(parent, text=text, fg=fg_white, bg=bg_dark, font=label_font).pack(anchor="w", pady=(14, 4))
-
-    # Gemini
-    fr = provider_block("gemini")
-    field_label(fr, "Gemini API 키")
-    row, ent_gemini_key = secret_entry(fr, config.get("gemini_api_key", ""))
-    row.pack(fill="x")
-    field_label(fr, "Gemini 모델")
-    cmb_gemini_model = ttk.Combobox(fr, values=list(GEMINI_MODEL_LABELS.values()), state="readonly")
-    current_gemini_model = config.get("gemini_model", DEFAULT_GEMINI_MODEL)
-    if current_gemini_model not in GEMINI_MODEL_LABELS:
-        current_gemini_model = DEFAULT_GEMINI_MODEL
-    cmb_gemini_model.set(GEMINI_MODEL_LABELS[current_gemini_model])
-    cmb_gemini_model.pack(fill="x")
-    wrap_label(fr, "무료 한도는 모델별로 걸립니다. 막히면 다른 Gemini 모델로 자동 전환합니다.").pack(anchor="w", fill="x", pady=(4, 0))
-
-    # OpenAI (모델은 코드에 고정)
-    fr = provider_block("openai")
-    field_label(fr, "OpenAI API 키")
-    row, ent_openai_key = secret_entry(fr, config.get("openai_api_key", ""))
-    row.pack(fill="x")
-    wrap_label(fr, f"모델: {OPENAI_MODEL} (고정)").pack(anchor="w", fill="x", pady=(6, 0))
-
-    # Claude
-    fr = provider_block("claude")
-    field_label(fr, "Claude API 키")
-    row, ent_claude_key = secret_entry(fr, config.get("claude_api_key", ""))
-    row.pack(fill="x")
-    field_label(fr, "Claude 모델")
-    cmb_claude_model = ttk.Combobox(fr, values=list(CLAUDE_MODEL_LABELS.values()), state="readonly")
-    current_claude_model = config.get("claude_model", DEFAULT_CLAUDE_MODEL)
-    if current_claude_model not in CLAUDE_MODEL_LABELS:
-        current_claude_model = DEFAULT_CLAUDE_MODEL
-    cmb_claude_model.set(CLAUDE_MODEL_LABELS[current_claude_model])
-    cmb_claude_model.pack(fill="x")
-
-    def show_provider_fields(_event=None):
-        chosen = PROVIDER_LABELS_REV.get(cmb_provider.get(), "gemini")
-        for key, frame in provider_frames.items():
-            if key == chosen:
-                frame.pack(fill="x")
+        def check_key(_e=None):
+            g = guess_provider(ent.get())
+            if g and g != st["provider"]:
+                warn.configure(text=f"이 키는 {PROVIDER_UI[g]} 키로 보여요. 위에서 공급자를 확인해 주세요.")
+                warn.grid(row=1, column=1, sticky="w", pady=(4, 0))
             else:
-                frame.pack_forget()
+                warn.grid_forget()
 
-    cmb_provider.bind("<<ComboboxSelected>>", show_provider_fields)
-    show_provider_fields()
+        ent.bind("<KeyRelease>", check_key)
+        check_key()
 
-    # 고급 설정 — 유료(결제 연동) 키. 무료 키가 한도에 걸리면 자동으로 이 키로 넘어간다.
-    PAID_PROVIDER_SAME = "무료와 동일"
-    PAID_PROVIDER_LABELS = {"": PAID_PROVIDER_SAME, **PROVIDER_LABELS}
-    PAID_PROVIDER_LABELS_REV = {v: k for k, v in PAID_PROVIDER_LABELS.items()}
-
-    advanced_open = {"v": False}
-    btn_advanced = tk.Button(
-        tab_ai, text="", bg=bg_dark, fg=sub_color, relief="flat", cursor="hand2", anchor="w",
-        activebackground=bg_dark, activeforeground=fg_white, font=label_font, bd=0,
-    )
-    btn_advanced.pack(anchor="w", pady=(22, 0))
-    advanced_frame = tk.Frame(tab_ai, bg=bg_dark)
-
-    field_label(advanced_frame, "유료 공급자")
-    cmb_paid_provider = ttk.Combobox(advanced_frame, values=list(PAID_PROVIDER_LABELS.values()), state="readonly")
-    current_paid_provider = (config.get("paid_provider") or "").strip().lower()
-    if current_paid_provider not in PAID_PROVIDER_LABELS:
-        current_paid_provider = ""
-    cmb_paid_provider.set(PAID_PROVIDER_LABELS[current_paid_provider])
-    cmb_paid_provider.pack(fill="x")
-    field_label(advanced_frame, "유료 API 키")
-    row, ent_paid_key = secret_entry(advanced_frame, config.get("paid_api_key", ""))
-    row.pack(fill="x")
-    wrap_label(
-        advanced_frame,
-        "무료 키가 한도(429)에 걸리면 자동으로 이 키로 넘어갑니다. 비워두면 전환하지 않습니다. "
-        "과금되는 키이며, 위에서 고른 유료 공급자의 키를 넣어야 합니다. "
-        "Gemini 는 한도가 프로젝트 단위라 같은 프로젝트의 키는 소용없습니다 — 결제 연결된 다른 프로젝트의 키를 쓰세요.",
-    ).pack(anchor="w", fill="x", pady=(6, 0))
-
-    def toggle_advanced(force=None):
-        advanced_open["v"] = (not advanced_open["v"]) if force is None else force
-        if advanced_open["v"]:
-            advanced_frame.pack(fill="x", after=btn_advanced)
-            btn_advanced.configure(text="▾ 고급 설정 (유료 키)")
+        w = {"key": ent}
+        label(grid, "모델", 12, color=SUB).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=(10, 0))
+        if st["provider"] in MODEL_LABELS:
+            labels = MODEL_LABELS[st["provider"]]
+            cur = labels.get(st["model"]) or labels[default_model_for(st["provider"])]
+            om = option(grid, list(labels.values()), cur, width=300)
+            om.grid(row=2, column=1, sticky="ew", pady=(10, 0))
+            w["model"] = om
         else:
-            advanced_frame.pack_forget()
-            btn_advanced.configure(text="▸ 고급 설정 (유료 키)")
+            label(grid, f"{OPENAI_MODEL} (고정)", 13).grid(row=2, column=1, sticky="w", pady=(10, 0))
+        return w
 
-    btn_advanced.configure(command=toggle_advanced)
-    toggle_advanced(force=False)
+    render_chain()
 
     # =========================================================================
-    # 탭 3. 규칙 — 커스텀 지침, 기본 파일명 형식, 자동 이동 규칙
+    # 탭 3. 규칙
     # =========================================================================
-    tab_rules = make_page("  규칙  ")
+    pg = pages["규칙"]
+    rules_state = [dict(when=r.get("when", ""), how=r.get("how", "")) for r in (config.get("naming_rules") or []) if isinstance(r, dict)]
+    common_state = {"text": (config.get("common_rules") or "").strip()}
+    if not rules_state and not common_state["text"]:
+        # 구버전 통짜 지침은 버리지 않고 「공통」으로 옮긴다 — 동작이 그대로 유지된다
+        common_state["text"] = (config.get("user_rules") or "").strip()
+    move_state = [dict(r) for r in (config.get("move_rules") or []) if isinstance(r, dict)]
 
-    section(
-        tab_rules, "커스텀 지침",
-        "특정 파일을 어떻게 이름 지을지 한글로 자유롭게 적으세요. 여기 적은 형식이 아래 기본 형식보다 항상 우선합니다.",
-        top=10,
-    )
-    rules_frame = tk.Frame(tab_rules, bg=bg_dark)
-    rules_frame.pack(fill="both", expand=True)
-    txt_rules = tk.Text(
-        rules_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, font=body_font,
-        wrap="word", relief="flat", highlightthickness=1, highlightbackground=bg_button,
-        highlightcolor=fg_mint, height=14, width=1, padx=8, pady=6, undo=True,
-    )
-    # width=1: Text 기본 폭(80자)이 창보다 넓어 오른쪽이 잘리고 스크롤바가 밀려나던 것 방지(폭은 fill 로 채운다).
-    # 스크롤바를 먼저 pack 해야 공간이 모자랄 때 스크롤바가 아니라 입력칸이 줄어든다.
-    rules_scroll = tk.Scrollbar(rules_frame, orient="vertical", command=txt_rules.yview)
-    rules_scroll.pack(side="right", fill="y")
-    txt_rules.pack(side="left", fill="both", expand=True)
-    txt_rules.configure(yscrollcommand=rules_scroll.set)
+    # ---- 이름 짓는 지침 ----
+    c = card(pg, "이름 짓는 지침", "위에서부터 확인해 처음 맞는 지침 하나만 씁니다. 아래 기본 형식보다 우선해요.")
+    rules_box = list_box(c)
 
-    # 실제 저장된 지침이 비어 있으면, 회색 예시 한 줄만 안내용으로 보여준다 (저장되는 값 아님)
-    RULES_PLACEHOLDER = "예: 카드 사용내역 엑셀이면 카드 끝번호 4자리를 제목에 포함해줘"
-    existing_rules = config.get("user_rules", "").strip()
-    placeholder_state = {"active": not existing_rules}
-    if existing_rules:
-        txt_rules.insert("1.0", existing_rules)
-    else:
-        txt_rules.insert("1.0", RULES_PLACEHOLDER)
-        txt_rules.configure(fg=sub_color)
+    def first_line(s, n=60):
+        s = (s or "").strip().splitlines()[0] if (s or "").strip() else ""
+        return s if len(s) <= n else s[:n - 1] + "…"
 
-    def on_rules_focus_in(event):
-        if placeholder_state["active"]:
-            txt_rules.delete("1.0", "end")
-            txt_rules.configure(fg=fg_white)
-            placeholder_state["active"] = False
+    def render_rules():
+        for w in rules_box.winfo_children():
+            w.destroy()
+        for i, r in enumerate(rules_state):
+            row = ctk.CTkFrame(rules_box, fg_color="transparent", cursor="hand2")
+            row.pack(fill="x", padx=(12, 4), pady=4)
+            badge(row, str(i + 1)).pack(side="left", padx=(0, 10))
+            col = ctk.CTkFrame(row, fg_color="transparent", cursor="hand2")
+            col.pack(side="left", fill="x", expand=True)
+            l1 = label(col, first_line(r["when"], 40) or "(조건 없음)", 13, True)
+            l1.pack(anchor="w")
+            l2 = label(col, first_line(r["how"]), 12, color=SUB)
+            l2.pack(anchor="w")
+            for wdg in (row, col, l1, l2):
+                wdg.bind("<Button-1>", lambda e, i=i: open_rule_dialog(i))
+            button(row, "✕", lambda i=i: (rules_state.pop(i), render_rules()), "icon", width=34, height=40).pack(side="right")
+            if i > 0:
+                button(row, "↑", lambda i=i: (rules_state.insert(i - 1, rules_state.pop(i)), render_rules()), "icon", width=34, height=40).pack(side="right")
+            separator_line(rules_box)
+        row = ctk.CTkFrame(rules_box, fg_color="transparent", cursor="hand2")
+        row.pack(fill="x", padx=(12, 4), pady=4)
+        badge(row, "—", strong=False).pack(side="left", padx=(0, 10))
+        col = ctk.CTkFrame(row, fg_color="transparent", cursor="hand2")
+        col.pack(side="left", fill="x", expand=True)
+        l1 = label(col, "공통 (항상 적용)", 13, True)
+        l1.pack(anchor="w")
+        l2 = label(col, first_line(common_state["text"]) or "비어 있음 — 눌러서 적기", 12, color=SUB)
+        l2.pack(anchor="w")
+        for wdg in (row, col, l1, l2):
+            wdg.bind("<Button-1>", lambda e: open_common_dialog())
+        button(row, "›", lambda: open_common_dialog(), "icon", width=34, height=40).pack(side="right")
 
-    def on_rules_focus_out(event):
-        if not txt_rules.get("1.0", "end-1c").strip():
-            txt_rules.delete("1.0", "end")
-            txt_rules.insert("1.0", RULES_PLACEHOLDER)
-            txt_rules.configure(fg=sub_color)
-            placeholder_state["active"] = True
+    # ---- 기본 파일명 형식 ----
+    c2_title = "기본 파일명 형식"
+    TOKENS = [("날짜", "date"), ("시각", "time"), ("내용요약", "summary"), ("출처", "site"), ("원래 이름", "original")]
+    SEP_UI = {"_": "구분 _", "-": "구분 -", " ": "구분 공백"}
+    SEP_UI_REV = {v: k for k, v in SEP_UI.items()}
+    fmt_var = ctk.StringVar(value=(config.get("filename_format") or "").strip() or DEFAULT_FILENAME_FORMAT)
+    fmt_history = []
+    m = re.search(r"\}([_\- ])\{", fmt_var.get())
+    sep_state = {"sep": m.group(1) if m else "_"}
+    date_fmt_state = {"v": config.get("date_format") if config.get("date_format") in DATE_FORMATS else DEFAULT_DATE_FORMAT}
 
-    txt_rules.bind("<FocusIn>", on_rules_focus_in)
-    txt_rules.bind("<FocusOut>", on_rules_focus_out)
+    # ---- 자동 이동 ----
+    def render_moves():
+        for w in move_box.winfo_children():
+            w.destroy()
+        if not move_state:
+            label(move_box, "아직 규칙이 없어요.", 12, color=SUB).pack(anchor="w", padx=14, pady=12)
+        for i, r in enumerate(move_state):
+            if i:
+                separator_line(move_box)
+            row = ctk.CTkFrame(move_box, fg_color="transparent", cursor="hand2")
+            row.pack(fill="x", padx=(14, 4), pady=4)
+            col = ctk.CTkFrame(row, fg_color="transparent", cursor="hand2")
+            col.pack(side="left", fill="x", expand=True)
+            l1 = label(col, first_line(r.get("keyword", ""), 40), 13, True)
+            l1.pack(anchor="w")
+            l2 = label(col, "→ " + first_line(r.get("folder", ""), 56), 12, color=SUB)
+            l2.pack(anchor="w")
+            for wdg in (row, col, l1, l2):
+                wdg.bind("<Button-1>", lambda e, i=i: open_move_dialog(i))
+            button(row, "✕", lambda i=i: (move_state.pop(i), render_moves()), "icon", width=40, height=40).pack(side="right")
 
-    section(
-        tab_rules, "기본 파일명 형식",
-        "date(날짜) · summary(내용요약) · site(출처)를 원하는 순서로 적으세요. 예: date_summary_site — site 가 없으면 자동으로 빠집니다.",
-    )
-    entry_filename_format = flat_entry(tab_rules)
-    entry_filename_format.pack(fill="x", ipady=3)
-    entry_filename_format.insert(0, (config.get("filename_format") or "").strip() or DEFAULT_FILENAME_FORMAT)
+    render_rules()
+    button(c, "+  지침 추가", lambda: open_rule_dialog(None), "ghost", height=34).pack(anchor="w", pady=(8, 0))
 
-    section(tab_rules, "자동 이동 규칙", "AI 가 파일이 조건에 맞다고 판단하면 지정한 폴더로 옮깁니다. 예: 카드 사용내역 엑셀 → D:\\카드정리")
-    move_list_frame, lst_move_rules = make_listbox(tab_rules, height=5)
-    move_list_frame.pack(fill="x")
+    c = card(pg)
+    head = ctk.CTkFrame(c, fg_color="transparent")
+    head.pack(fill="x")
+    label(head, c2_title, 15, True).pack(side="left")
 
-    move_rules_state = [dict(r) for r in (config.get("move_rules") or [])]
+    def fmt_set(v, record=True):
+        if record:
+            fmt_history.append(fmt_var.get())
+        fmt_var.set(v)
 
-    def refresh_move_rules_listbox():
-        lst_move_rules.delete(0, "end")
-        for r in move_rules_state:
-            lst_move_rules.insert("end", f'{r.get("keyword", "")}  →  {r.get("folder", "")}')
+    button(head, "비우기", lambda: fmt_set(""), "icon", width=56, height=30, font=F(12)).pack(side="right")
+    button(head, "↶ 되돌리기", lambda: fmt_set(fmt_history.pop(), False) if fmt_history else None,
+           "icon", width=84, height=30, font=F(12)).pack(side="right")
 
-    refresh_move_rules_listbox()
+    frow = ctk.CTkFrame(c, fg_color="transparent")
+    frow.pack(fill="x", pady=(8, 8))
+    ent_fmt = ctk.CTkEntry(frow, textvariable=fmt_var, fg_color=FIELD, border_color=BORDER, border_width=1,
+                           text_color=TEXT, corner_radius=10, height=38, font=F(13))
+    ent_fmt.pack(side="left", fill="x", expand=True)
 
-    def add_move_rule():
-        dialog = tk.Toplevel(root)
-        dialog.title("이동 규칙 추가")
-        dialog.configure(bg=bg_dark)
-        dialog.attributes("-topmost", True)
-        dialog.resizable(False, False)
-        dialog.transient(root)
+    def change_sep(ui):
+        sep = SEP_UI_REV[ui]
+        sep_state["sep"] = sep
+        fmt_set(re.sub(r"\}[_\- ]+\{", "}" + sep + "{", fmt_var.get()))
 
-        tk.Label(dialog, text="조건 설명 (예: 카드 사용내역 엑셀 파일)", fg=fg_white, bg=bg_dark, font=label_font).pack(anchor="w", padx=16, pady=(16, 4))
-        ent_condition = flat_entry(dialog, width=46)
-        ent_condition.pack(fill="x", padx=16, ipady=3)
-        ent_condition.focus_set()
+    option(frow, list(SEP_UI.values()), SEP_UI[sep_state["sep"]], change_sep, width=104).pack(side="left", padx=(8, 0))
 
-        tk.Label(dialog, text="이동할 폴더", fg=fg_white, bg=bg_dark, font=label_font).pack(anchor="w", padx=16, pady=(16, 4))
-        dest_row = tk.Frame(dialog, bg=bg_dark)
-        dest_row.pack(fill="x", padx=16)
-        ent_dest = flat_entry(dest_row)
-        ent_dest.pack(side="left", fill="x", expand=True, ipady=3)
+    chips = ctk.CTkFrame(c, fg_color="transparent")
+    chips.pack(fill="x")
 
-        def browse_dest():
-            selected = filedialog.askdirectory(parent=dialog)
-            if selected:
-                ent_dest.delete(0, "end")
-                ent_dest.insert(0, selected)
+    def add_token(tok):
+        cur = fmt_var.get().rstrip()
+        fmt_set(cur + (sep_state["sep"] if cur and not cur.endswith(("_", "-", " ")) else "") + "{" + tok + "}")
 
-        flat_button(dest_row, "찾기...", browse_dest).pack(side="left", padx=(6, 0))
+    # 1줄: [+ 날짜][날짜 형식 ▾][+ 시각]  2줄: [+ 내용요약][+ 출처][+ 원래 이름]
+    chip_row1 = ctk.CTkFrame(chips, fg_color="transparent")
+    chip_row1.pack(fill="x", pady=(0, 6))
+    chip_row2 = ctk.CTkFrame(chips, fg_color="transparent")
+    chip_row2.pack(fill="x")
+    button(chip_row1, "+ 날짜", lambda: add_token("date"), "chip", width=64, height=30).pack(side="left", padx=(0, 4))
+    date_om = option(chip_row1, list(DATE_FORMATS.keys()), date_fmt_state["v"],
+                     lambda v: (date_fmt_state.__setitem__("v", v), update_preview()), width=124)
+    date_om.configure(height=30)
+    date_om.pack(side="left", padx=(0, 12))
+    for parent, (ui, tok) in zip((chip_row1, chip_row2, chip_row2, chip_row2), TOKENS[1:]):
+        button(parent, f"+ {ui}", lambda t=tok: add_token(t), "chip", width=64, height=30).pack(side="left", padx=(0, 6))
 
-        def confirm_add():
-            cond = ent_condition.get().strip()
-            dest = ent_dest.get().strip()
-            if not cond or not dest:
-                messagebox.showerror("입력 필요", "조건 설명과 폴더를 모두 입력하세요.", parent=dialog)
+    preview = label(c, "", 12, color=SUB, wrap_extra=40)
+    preview.pack(anchor="w", fill="x", pady=(8, 0))
+
+    def update_preview(*_):
+        now = datetime.datetime.now()
+        try:
+            name = build_filename_from_format(fmt_var.get(), now.strftime("%Y%m%d"), "거래내역_엑셀", "IBK기업은행",
+                                              time=now.strftime("%H%M"), original="lkj",
+                                              date_format=date_fmt_state["v"])
+        except Exception:
+            name = "(형식을 읽지 못했어요)"
+        preview.configure(text=f"미리보기   {name}.xlsx")
+
+    fmt_var.trace_add("write", update_preview)
+    update_preview()
+
+    c = card(pg, "자동 이동", "조건에 맞으면 지정한 폴더로 옮깁니다.")
+    move_box = list_box(c)
+    render_moves()
+    button(c, "+  규칙 추가", lambda: open_move_dialog(None), "ghost", height=34).pack(anchor="w", pady=(8, 0))
+
+    # =========================================================================
+    # 추가·편집 창 (지침 / 공통 / 이동 규칙) — 「AI로 다듬기」 포함
+    # =========================================================================
+    def open_dialog(kind, title, initial, on_ok, ok_text):
+        dlg = ctk.CTkToplevel(root)
+        dlg.title(title)
+        dlg.configure(fg_color=CARD)
+        dlg.transient(root)
+        dlg.attributes("-topmost", True)
+        dlg.resizable(False, False)
+        dw, dh = 500, {"rule": 640, "move": 600, "common": 600}[kind]
+        rx, ry = root.winfo_rootx(), root.winfo_rooty()
+        dlg.geometry(f"{dw}x{dh}+{rx + max((root.winfo_width() - dw) // 2, 0)}+{ry + 40}")
+        dlg.after(250, _set_icon_for(dlg))
+
+        body = ctk.CTkFrame(dlg, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=24, pady=20)
+        label(body, title, 18, True).pack(anchor="w", pady=(0, 12))
+
+        fields = {}
+        if kind == "rule":
+            label(body, "어떤 파일일 때", 13, True).pack(anchor="w", pady=(0, 4))
+            fields["when"] = textbox(body, initial.get("when", ""), 60)
+            fields["when"].pack(fill="x", pady=(0, 10))
+            label(body, "이름은 이렇게", 13, True).pack(anchor="w", pady=(0, 4))
+            fields["how"] = textbox(body, initial.get("how", ""), 80)
+            fields["how"].pack(fill="x", pady=(0, 10))
+        elif kind == "move":
+            label(body, "이런 파일이면", 13, True).pack(anchor="w", pady=(0, 4))
+            fields["when"] = textbox(body, initial.get("keyword", ""), 60)
+            fields["when"].pack(fill="x", pady=(0, 10))
+        else:
+            label(body, "모든 파일에 항상 같이 적용할 지침", 13, True).pack(anchor="w", pady=(0, 4))
+            fields["when"] = textbox(body, initial.get("text", ""), 200)
+            fields["when"].pack(fill="x", pady=(0, 10))
+
+        # AI로 다듬기 — 저장된 설정의 1순위 키로 호출. 화면에서 고쳤어도 저장 전이면 반영되지 않는다.
+        saved_chain = get_ai_chain(load_config())
+        arow = ctk.CTkFrame(body, fg_color="transparent")
+        arow.pack(fill="x", pady=(0, 10))
+        refine_btn = button(arow, "✦  AI로 다듬기", None, "field", height=38, text_color=ACCENT, font=F(13, True), width=130)
+        refine_btn.pack(side="left")
+        model_hint = saved_chain[0]["model"] if saved_chain else ""
+        label(arow, f"AI 탭 1순위({model_hint})로 한 번 호출해요 · 0.1센트 미만" if saved_chain else "AI 탭 1순위 키로 한 번 호출해요",
+              11, color=SUB).pack(side="left", padx=(10, 0))
+
+        status = ctk.CTkFrame(body, fg_color="transparent")
+        status.pack(fill="x")
+
+        def box(bg, bd, title_text, title_color, msg, actions=()):
+            for w in status.winfo_children():
+                w.destroy()
+            fr = ctk.CTkFrame(status, fg_color=bg, border_color=bd, border_width=1, corner_radius=12)
+            fr.pack(fill="x")
+            inner = ctk.CTkFrame(fr, fg_color="transparent")
+            inner.pack(fill="x", padx=14, pady=12)
+            label(inner, title_text, 12, True, color=title_color).pack(anchor="w")
+            lbl = label(inner, msg, 13)
+            lbl.configure(wraplength=dw - 90)
+            lbl.pack(anchor="w", fill="x", pady=(4, 0))
+            if actions:
+                ar = ctk.CTkFrame(inner, fg_color="transparent")
+                ar.pack(fill="x", pady=(8, 0))
+                for text, cmd, k in reversed(actions):
+                    button(ar, text, cmd, k, height=32, font=F(12, True)).pack(side="right", padx=(6, 0))
+
+        def clear_status():
+            for w in status.winfo_children():
+                w.destroy()
+
+        if not saved_chain:
+            refine_btn.configure(state="disabled", text_color=SUB)
+            box(WARN_BG, WARN_BD, "저장된 API 키가 없어요", WARN_TX,
+                "AI 탭에서 키를 넣고 저장한 뒤에 쓸 수 있어요. 다듬기 없이 적은 그대로 추가해도 됩니다.")
+
+        def get(name):
+            return fields[name].get("1.0", "end-1c").strip() if name in fields else ""
+
+        def put(name, value):
+            fields[name].delete("1.0", "end")
+            fields[name].insert("1.0", value)
+
+        def do_refine():
+            when = get("when")
+            if not when:
+                box(WARN_BG, WARN_BD, "먼저 내용을 적어 주세요", WARN_TX, "적은 문장을 AI가 알아듣기 쉽게 다듬어 드려요.")
                 return
-            move_rules_state.append({"keyword": cond, "folder": dest})
-            refresh_move_rules_listbox()
-            dialog.destroy()
+            refine_btn.configure(state="disabled", text="다듬는 중…")
+            clear_status()
 
-        btn_row = tk.Frame(dialog, bg=bg_dark)
-        btn_row.pack(fill="x", padx=16, pady=20)
-        flat_button(btn_row, "추가", confirm_add, primary=True).pack(side="left")
-        flat_button(btn_row, "취소", dialog.destroy).pack(side="left", padx=(8, 0))
+            def work():
+                try:
+                    res = refine_text(kind, when, get("how"))
+                    dlg.after(0, lambda: show_suggestion(res))
+                except RefineError as e:
+                    msg = str(e)
+                    dlg.after(0, lambda: show_error(msg))
+                except Exception as e:  # 예상 못 한 오류도 창이 굳지 않게
+                    msg = f"알 수 없는 오류: {e}"
+                    dlg.after(0, lambda: show_error(msg))
 
-    def remove_selected_move_rule():
-        for idx in reversed(lst_move_rules.curselection()):
-            del move_rules_state[idx]
-        refresh_move_rules_listbox()
+            threading.Thread(target=work, daemon=True).start()
 
-    move_btn_row = tk.Frame(tab_rules, bg=bg_dark)
-    move_btn_row.pack(fill="x", pady=(6, 0))
-    flat_button(move_btn_row, "+ 규칙 추가", add_move_rule).pack(side="left")
-    flat_button(move_btn_row, "선택 삭제", remove_selected_move_rule, fg=DANGER_FG).pack(side="left", padx=(6, 0))
+        def reset_btn():
+            if dlg.winfo_exists():
+                refine_btn.configure(state="normal", text="✦  AI로 다듬기")
+
+        def show_error(msg):
+            if not dlg.winfo_exists():
+                return
+            reset_btn()
+            box(ERR_BG, ERR_BD, "다듬기에 실패했어요", ERR_TX, msg + " 적은 그대로 추가할 수는 있어요.",
+                actions=[("다시 시도", do_refine, "field")])
+
+        def show_suggestion(res):
+            if not dlg.winfo_exists():
+                return
+            reset_btn()
+            text = res["when"] if kind != "rule" else f"조건  {res['when']}\n\n이름  {res.get('how', '')}"
+
+            def use():
+                put("when", res["when"])
+                if kind == "rule":
+                    put("how", res.get("how", ""))
+                clear_status()
+
+            box(SUG_BG, SUG_BD, f"AI가 다듬은 내용 · {res.get('model', '')}", BADGE_TX, text,
+                actions=[("원래 문장 쓰기", clear_status, "icon"), ("이걸로 쓰기", use, "field")])
+
+        refine_btn.configure(command=do_refine)
+
+        dest = None
+        if kind == "move":
+            label(body, "이 폴더로 옮기기", 13, True).pack(anchor="w", pady=(10, 4))
+            drow = ctk.CTkFrame(body, fg_color="transparent")
+            drow.pack(fill="x")
+            dest = entry(drow, initial.get("folder", ""))
+            dest.pack(side="left", fill="x", expand=True)
+
+            def browse():
+                sel = filedialog.askdirectory(parent=dlg)
+                if sel:
+                    dest.delete(0, "end")
+                    dest.insert(0, sel)
+
+            button(drow, "찾기", browse, "field", width=60, height=38).pack(side="left", padx=(6, 0))
+
+        foot = ctk.CTkFrame(dlg, fg_color="transparent")
+        foot.pack(side="bottom", fill="x", padx=24, pady=(0, 20))
+
+        def ok():
+            if kind == "rule":
+                if not get("when") or not get("how"):
+                    messagebox.showerror("입력 필요", "「어떤 파일일 때」와 「이름은 이렇게」를 모두 적어 주세요.", parent=dlg)
+                    return
+                on_ok({"when": get("when"), "how": get("how")})
+            elif kind == "move":
+                if not get("when") or not dest.get().strip():
+                    messagebox.showerror("입력 필요", "조건과 폴더를 모두 입력해 주세요.", parent=dlg)
+                    return
+                on_ok({"keyword": get("when"), "folder": dest.get().strip()})
+            else:
+                on_ok({"text": get("when")})
+            dlg.destroy()
+
+        button(foot, ok_text, ok, "primary", width=90, height=42, corner_radius=12).pack(side="right")
+        button(foot, "취소", dlg.destroy, "secondary", width=80, height=42, corner_radius=12).pack(side="right", padx=(0, 8))
+        dlg.after(150, lambda: (dlg.lift(), dlg.focus_force(), dlg.grab_set()))
+
+    def _set_icon_for(win):
+        def _f():
+            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            ico = os.path.join(base, "app_icon.ico")
+            if os.path.exists(ico):
+                try:
+                    win.iconbitmap(ico)
+                except Exception:
+                    pass
+        return _f
+
+    def open_rule_dialog(i):
+        init = rules_state[i] if i is not None else {}
+
+        def done(v):
+            if i is None:
+                rules_state.append(v)
+            else:
+                rules_state[i] = v
+            render_rules()
+
+        open_dialog("rule", "지침 추가" if i is None else "지침 편집", init, done, "추가" if i is None else "저장")
+
+    def open_common_dialog():
+        def done(v):
+            common_state["text"] = v["text"]
+            render_rules()
+
+        open_dialog("common", "공통 지침", {"text": common_state["text"]}, done, "저장")
+
+    def open_move_dialog(i):
+        init = move_state[i] if i is not None else {}
+
+        def done(v):
+            if i is None:
+                move_state.append(v)
+            else:
+                move_state[i] = v
+            render_moves()
+
+        open_dialog("move", "이동 규칙 추가" if i is None else "이동 규칙 편집", init, done, "추가" if i is None else "저장")
 
     # =========================================================================
     # 저장
     # =========================================================================
+    def on_close():
+        root.destroy()
+
     def on_save():
         sec_val = ent_sec.get().strip()
         if not sec_val.isdigit():
-            nb.select(0)
-            messagebox.showerror("데이터 오류", "카운트다운은 반드시 숫자(초)로 입력해야 합니다.", parent=root)
+            tabs.set("일반"); show_tab("일반")
+            messagebox.showerror("데이터 오류", "카운트다운은 숫자(초)로 입력해 주세요.", parent=root)
+            return
+        if not folders_state:
+            tabs.set("일반"); show_tab("일반")
+            messagebox.showerror("데이터 오류", "감시 폴더를 하나 이상 추가해 주세요.", parent=root)
+            return
+        collect_chain()
+        chain = [dict(e) for e in chain_state if e.get("api_key")]
+        for e in chain:
+            if e["provider"] == "openai":
+                e["model"] = OPENAI_MODEL
+        if not chain:
+            tabs.set("AI"); show_tab("AI")
+            messagebox.showerror("데이터 오류", "AI 탭에 API 키를 하나 이상 넣어 주세요.", parent=root)
             return
 
-        folders = [f for f in lst_folders.get(0, "end") if f.strip()]
-        if not folders:
-            nb.select(0)
-            messagebox.showerror("데이터 오류", "감시 대상 폴더를 최소 1개 이상 추가해야 합니다.", parent=root)
-            return
-
-        rules_val = "" if placeholder_state["active"] else txt_rules.get("1.0", "end-1c").strip()
-
-        # 화면에 없는 키(gemini_model_rotation 등)를 지우지 않도록 기존 설정 위에 덮어쓴다
-        new_config = dict(config)
+        new_config = dict(config)   # 화면에 없는 키(max_output_tokens 등)는 그대로 둔다
         new_config.update({
-            "ai_provider": PROVIDER_LABELS_REV.get(cmb_provider.get(), "gemini"),
-            "gemini_model": GEMINI_MODEL_LABELS_REV.get(cmb_gemini_model.get(), DEFAULT_GEMINI_MODEL),
-            "gemini_api_key": ent_gemini_key.get().strip(),
-            "openai_api_key": ent_openai_key.get().strip(),
-            "claude_api_key": ent_claude_key.get().strip(),
-            "claude_model": CLAUDE_MODEL_LABELS_REV.get(cmb_claude_model.get(), DEFAULT_CLAUDE_MODEL),
-            "paid_api_key": ent_paid_key.get().strip(),
-            "paid_provider": PAID_PROVIDER_LABELS_REV.get(cmb_paid_provider.get(), ""),
-            "watch_folders": folders,
+            "ai_chain": chain,
+            "gemini_model_rotation": bool(rotation_var.get()),
+            "watch_folders": list(folders_state),
             "countdown_seconds": int(sec_val),
-            "max_output_tokens": config.get("max_output_tokens", 1500),
-            "max_preview_chars": config.get("max_preview_chars", 2000),
-            "user_rules": rules_val,
-            "move_rules": move_rules_state,
-            "filename_format": entry_filename_format.get().strip() or DEFAULT_FILENAME_FORMAT,
+            "naming_rules": [dict(r) for r in rules_state],
+            "common_rules": common_state["text"],
+            "filename_format": fmt_var.get().strip() or DEFAULT_FILENAME_FORMAT,
+            "date_format": date_fmt_state["v"],
+            "move_rules": [dict(r) for r in move_state],
         })
+        new_config.update(chain_to_legacy(chain, config))          # 1.3.x 가 읽는 옛 AI 칸
+        new_config["user_rules"] = compose_user_rules(new_config)  # 1.3.x 가 읽는 옛 지침 칸
 
         if save_config(new_config):
-            messagebox.showinfo("설정 적용 완료", "설정이 저장되었습니다.\n실행 중인 감시 엔진에 바로 적용됩니다.", parent=root)
+            messagebox.showinfo("설정 저장", "저장했어요.\n실행 중인 감시 엔진에 바로 적용됩니다.", parent=root)
             on_close()
         else:
-            messagebox.showerror("저장 실패", "설정 파일 작성에 실패했습니다.", parent=root)
+            messagebox.showerror("저장 실패", "설정 파일을 쓰지 못했습니다.", parent=root)
 
-    bottom_inner = tk.Frame(bottom, bg=bg_entry)
-    bottom_inner.pack(fill="x", padx=24, pady=10)
-    flat_button(bottom_inner, "저장", on_save, primary=True).pack(side="right")
-    flat_button(bottom_inner, "취소", on_close).pack(side="right", padx=(0, 8))
+    button(bottom_inner, "저장", on_save, "primary", width=96, height=42, corner_radius=12).pack(side="right")
+    button(bottom_inner, "취소", on_close, "secondary", width=80, height=42, corner_radius=12).pack(side="right", padx=(0, 10))
     root.bind("<Control-s>", lambda e: on_save())
+    root.protocol("WM_DELETE_WINDOW", on_close)
 
+    show_tab("일반")
+    root.after(200, on_root_resize)
     root.mainloop()
 
 
@@ -711,11 +934,9 @@ def main():
 
     # 최초 실행(또는 선택된 공급자의 API 키 미설정 상태)이면 설정 창을 자동으로 띄워 안내
     try:
-        from file_namer import load_config
+        from file_namer import load_config, get_ai_chain
         cfg = load_config()
-        provider = cfg.get("ai_provider", "gemini")
-        key_field = {"gemini": "gemini_api_key", "openai": "openai_api_key", "claude": "claude_api_key"}.get(provider, "gemini_api_key")
-        if not cfg.get(key_field, "").strip():
+        if not get_ai_chain(cfg):
             watcher.show_toast(
                 "API 키 설정이 필요합니다",
                 "잠시 후 설정 창이 열립니다. 선택된 AI 공급자의 API 키를 입력해야 자동 정리가 동작합니다.",
@@ -754,6 +975,14 @@ def main():
 
     def on_open_log(icon, item):
         open_log_file()
+
+    def on_open_config_folder(icon, item):
+        """설정 파일을 탐색기에서 선택한 채로 연다 — AI 에이전트에게 경로를 알려 줄 때 쓴다(AI_설정가이드.md)."""
+        from file_namer import CONFIG_PATH
+        try:
+            subprocess.Popen(["explorer", "/select,", CONFIG_PATH])
+        except Exception as e:
+            watcher.log(f"[설정 파일 위치 열기 실패] {e}")
 
     def on_undo(icon, item):
         """실행취소 트레이 리시버 인터페이스"""
@@ -802,6 +1031,7 @@ def main():
             pystray.MenuItem("지금 정리하기 (7일↑)", on_cleanup),
             pystray.MenuItem("환경 설정 및 추가 지침", on_open_settings),
             pystray.MenuItem("로그 보기", on_open_log),
+            pystray.MenuItem("설정 파일 위치 열기", on_open_config_folder),
             pystray.MenuItem(f"업데이트 확인 (현재 v{updater.APP_VERSION})", on_check_update),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("종료", on_quit),

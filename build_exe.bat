@@ -19,7 +19,8 @@ del /q AutoRename.spec 2>nul
 
 echo [3/3] Building exe with PyInstaller...
 REM --onedir: do not unpack to %TEMP% on every launch (antivirus blocked it -> "Failed to load Python DLL")
-python -m PyInstaller --noconfirm --onedir --windowed --name "AutoRename" --icon "app_icon.ico" tray_app.py
+REM 2.0.0: bundle customtkinter theme json (--collect-data) and the window icon (--add-data)
+python -m PyInstaller --noconfirm --onedir --windowed --name "AutoRename" --icon "app_icon.ico" --collect-data customtkinter --add-data "app_icon.ico;." tray_app.py
 
 if errorlevel 1 (
     echo Build failed. Check the error message above.

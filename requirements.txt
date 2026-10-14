@@ -6,3 +6,4 @@ pymupdf
 pillow
 pystray
 pyinstaller
+customtkinter

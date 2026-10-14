@@ -8,6 +8,8 @@ python.zip
 # ── 로컬 백업 ──
 _backup_*/
 _paused/
+# 설정 백업 파일 — API 키가 들어 있다
+_backup_*.json
 
 # ── 파이썬 ──
 __pycache__/

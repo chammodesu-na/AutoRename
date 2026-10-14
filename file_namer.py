@@ -92,26 +92,54 @@ DAILY_QUOTA_MARKERS = ("perday", "dailylimit", "quotaexceededday")
 DEFAULT_FILENAME_FORMAT = "{date}_{summary}_{site}"
 
 
-def build_filename_from_format(fmt: str, date: str, summary: str, site: str) -> str:
+# 파일명 형식에 쓸 수 있는 값(2.0.0~ time·original 추가)과 날짜 형식. 설정 GUI의 값 버튼·날짜 드롭다운과 짝이다.
+FILENAME_TOKENS = ("date", "time", "summary", "site", "original")
+DATE_FORMATS = {           # config["date_format"] → strftime
+    "YYYYMMDD": "%Y%m%d",
+    "YYMMDD": "%y%m%d",
+    "YYYY-MM-DD": "%Y-%m-%d",
+    "YYYY.MM.DD": "%Y.%m.%d",
+    "YY.MM.DD": "%y.%m.%d",
+    "MMDD": "%m%d",
+}
+DEFAULT_DATE_FORMAT = "YYYYMMDD"
+_TOKEN_RE = re.compile(r"\{?(?<![A-Za-z])(" + "|".join(FILENAME_TOKENS) + r")(?![A-Za-z])\}?", re.IGNORECASE)
+
+
+def format_date(yyyymmdd: str, date_format: str | None) -> str:
+    """'20261014' 를 고른 날짜 형식으로. 형식을 모르거나 날짜를 못 읽으면 원래 값 그대로."""
+    try:
+        d = datetime.datetime.strptime(yyyymmdd, "%Y%m%d")
+        return d.strftime(DATE_FORMATS.get(date_format or DEFAULT_DATE_FORMAT, "%Y%m%d"))
+    except Exception:
+        return yyyymmdd
+
+
+def build_filename_from_format(fmt: str, date: str, summary: str, site: str,
+                               time: str = "", original: str = "", date_format: str | None = None) -> str:
     """
     사용자 설정 filename_format으로 실제 파일명을 조립한다.
-    date/summary/site 자리표시자는 중괄호를 써도({date}) 안 써도(date) 둘 다 인식한다.
-    site가 비어있으면 site 자리표시자와 그 앞에 붙은 구분자(_, -, 공백)까지 함께 제거해서
-    "20260710_요약_" 처럼 꼬리에 구분자만 남는 것을 방지한다.
+    자리표시자는 중괄호를 써도({date}) 안 써도(date) 둘 다 인식한다.
+    값이 빈 자리표시자(site 가 없을 때 등)는 그 앞 구분자(_, -, 공백)까지 함께 지워서
+    "20260710_요약_" 처럼 꼬리에 구분자만 남는 것을 막는다(맨 앞이면 뒤 구분자를 지운다).
     """
     fmt = (fmt or "").strip() or DEFAULT_FILENAME_FORMAT
-    if not site:
-        # '_'는 정규식 \b 기준으로 단어문자라 {date}_{summary}_{site}처럼 밑줄로 이어붙인 형식에서
-        # \b가 안 먹으므로, 영문자 경계((?<![A-Za-z])...(?![A-Za-z]))로 직접 판정한다.
-        fmt = re.sub(r"[-_\s]*\{?(?<![A-Za-z])site(?![A-Za-z])\}?", "", fmt, flags=re.IGNORECASE)
-
-    values = {"date": date, "summary": summary, "site": site}
+    values = {
+        "date": format_date(date, date_format),
+        "time": time, "summary": summary, "site": site, "original": original,
+    }
+    for name, val in values.items():
+        if not val:
+            # '_'는 정규식 \b 기준으로 단어문자라 밑줄로 이어붙인 형식에서 \b가 안 먹으므로 영문자 경계로 직접 판정한다.
+            pat = r"\{?(?<![A-Za-z])" + name + r"(?![A-Za-z])\}?"
+            fmt = re.sub(r"[-_\s]*" + pat, "", fmt, flags=re.IGNORECASE)
+            fmt = re.sub(r"^" + pat + r"[-_\s]*", "", fmt, flags=re.IGNORECASE)
 
     def _sub(m: "re.Match") -> str:
         return values.get(m.group(1).lower(), m.group(0))
 
-    result = re.sub(r"\{?(?<![A-Za-z])(date|summary|site)(?![A-Za-z])\}?", _sub, fmt, flags=re.IGNORECASE)
-    return result.strip("_- ") or f"{date}_{summary}" + (f"_{site}" if site else "")
+    result = _TOKEN_RE.sub(_sub, fmt)
+    return result.strip("_- ") or f"{values['date']}_{summary}" + (f"_{site}" if site else "")
 
 
 def _log_error(message: str):
@@ -153,6 +181,8 @@ def load_config() -> dict:
         "paid_api_key": "",
         # 유료 키를 쓸 공급자. 빈 문자열이면 위 ai_provider와 같은 공급자를 쓴다.
         "paid_provider": "",
+        # 2.0.0~ AI 순위 목록. 비어 있으면 위 구버전 칸에서 만들어 쓴다(get_ai_chain 참고).
+        "ai_chain": [],
         "watch_folders": [os.path.join(os.path.expanduser("~"), "Downloads")],
         "countdown_seconds": 3,
         "max_output_tokens": 99999,
@@ -160,6 +190,11 @@ def load_config() -> dict:
         "user_rules": "",           # 배포 기본값은 비워둠 (설정 GUI에 예시만 안내 문구로 표시됨)
         "move_rules": [],           # [{"keyword": "조건 설명(자연어)", "folder": "이동할 폴더 경로"}, ...]
         "filename_format": DEFAULT_FILENAME_FORMAT,  # custom_filename 미사용 시 기본 파일명 조립 형식
+        "date_format": DEFAULT_DATE_FORMAT,          # 2.0.0~ {date} 의 모양 (DATE_FORMATS 키)
+        # 2.0.0~ 이름 짓는 지침을 칸별로. [{"when": "어떤 파일일 때", "how": "이름은 이렇게"}, ...]
+        # 비어 있으면 구버전 user_rules(통짜 글)를 그대로 쓴다(compose_user_rules 참고).
+        "naming_rules": [],
+        "common_rules": "",          # 2.0.0~ 모든 파일에 항상 같이 적용하는 지침
     }
     if not os.path.exists(CONFIG_PATH):
         try:
@@ -192,6 +227,235 @@ def save_config(config: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+# ── AI 순위(ai_chain) ─────────────────────────────────────────────────────────
+# 2.0.0 부터 「무료 키 → 유료 키」 대신 「1·2·3순위」 목록으로 키를 쓴다(2026-10-14 사용자 제안).
+# 무료/유료는 이름뿐이고 실제로는 순서였기 때문 — 무료 칸에 유료 키를 넣으면 그냥 유료로 돈다.
+# config["ai_chain"] = [{"provider": "claude", "api_key": "...", "model": "claude-haiku-5-5"}, ...]
+# 비어 있으면 구버전 칸(ai_provider·*_api_key·paid_*)에서 만들어 쓴다(자동 마이그레이션).
+AI_CHAIN_MAX = 3
+
+
+def default_model_for(provider: str) -> str:
+    return {"gemini": DEFAULT_GEMINI_MODEL, "claude": DEFAULT_CLAUDE_MODEL}.get(provider, OPENAI_MODEL)
+
+
+def guess_provider(api_key: str) -> str | None:
+    """키 앞부분으로 공급자를 짐작한다. 모르면 None. (실측: 유료 공급자=openai 칸에 Claude 키가 들어가 있던 설정)"""
+    k = (api_key or "").strip()
+    if k.startswith("sk-ant-"):
+        return "claude"
+    if k.startswith(("AIza", "AQ.")):
+        return "gemini"
+    if k.startswith("sk-"):
+        return "openai"
+    return None
+
+
+def get_ai_chain(config: dict) -> list:
+    """설정에서 AI 순위 목록을 꺼낸다. 키가 빈 항목·완전히 같은 항목은 빼고 최대 AI_CHAIN_MAX 개."""
+    raw = config.get("ai_chain")
+    entries = []
+    if isinstance(raw, list) and raw:
+        for e in raw:
+            if isinstance(e, dict):
+                entries.append((e.get("provider"), e.get("api_key"), e.get("model")))
+    else:
+        provider = (config.get("ai_provider") or "gemini").strip().lower()
+        model_of = lambda p: config.get(f"{p}_model") if p in ("gemini", "claude") else None
+        entries.append((provider, config.get(f"{provider}_api_key"), model_of(provider)))
+        paid_key = config.get("paid_api_key")
+        paid_provider = (config.get("paid_provider") or "").strip().lower() or provider
+        # 구버전은 유료 공급자를 키와 따로 골라서, 키와 공급자가 어긋난 설정이 실제로 있었다 → 키 모양을 믿는다
+        paid_provider = guess_provider(paid_key) or paid_provider
+        entries.append((paid_provider, paid_key, model_of(paid_provider)))
+
+    chain, seen = [], set()
+    for provider, key, model in entries:
+        provider = (provider or "").strip().lower()
+        key = (key or "").strip()
+        if provider not in AI_PROVIDERS or not key:
+            continue
+        model = (model or "").strip() or default_model_for(provider)
+        if provider == "openai":
+            model = OPENAI_MODEL
+        sig = (provider, key, model)
+        if sig in seen:  # 같은 키·같은 모델을 두 번 부르는 건 의미가 없다(같은 한도에 막힌다)
+            continue
+        seen.add(sig)
+        chain.append({"provider": provider, "api_key": key, "model": model})
+    return chain[:AI_CHAIN_MAX]
+
+
+def chain_to_legacy(chain: list, config: dict) -> dict:
+    """구버전(1.3.3 이하)이 같은 설정 파일을 읽어도 동작하도록 옛 칸을 채운다. 1순위=무료, 2순위=유료."""
+    out = {}
+    if not chain:
+        return out
+    out["ai_provider"] = chain[0]["provider"]
+    for p in AI_PROVIDERS:
+        first = next((e for e in chain if e["provider"] == p), None)
+        if first:
+            out[f"{p}_api_key"] = first["api_key"]
+            if p in ("gemini", "claude"):
+                out[f"{p}_model"] = first["model"]
+    if len(chain) > 1:
+        out["paid_api_key"] = chain[1]["api_key"]
+        out["paid_provider"] = chain[1]["provider"]
+    else:
+        out["paid_api_key"] = ""
+        out["paid_provider"] = ""
+    return out
+
+
+# ── 이름 짓는 지침(naming_rules + common_rules) ───────────────────────────────
+# 2.0.0 부터 지침을 칸별로 저장하고, AI 에 보낼 때 「1번부터 처음 맞는 하나만」 글로 합친다.
+# naming_rules 가 비어 있으면 구버전 통짜 user_rules 를 그대로 쓴다(기존 사용자 동작 보존).
+def compose_user_rules(config: dict) -> str:
+    rules = [r for r in (config.get("naming_rules") or [])
+             if isinstance(r, dict) and ((r.get("when") or "").strip() or (r.get("how") or "").strip())]
+    common = (config.get("common_rules") or "").strip()
+    if not rules and not common:
+        return (config.get("user_rules") or "").strip()
+
+    lines = []
+    if rules:
+        lines.append(
+            "[적용 방법] 아래 지침을 1번부터 차례로 확인하고, 처음 해당하는 지침 하나만 적용한다. "
+            "지침이 파일명 형식을 정하면 그 형식대로 완성한 이름을 custom_filename 에 넣는다. "
+            "지침이 '바꾸지 않음'이면 decision 을 \"ok\" 로 한다. 해당하는 지침이 없으면 기본 방식(summary/site)으로 짓는다."
+        )
+        for i, r in enumerate(rules, 1):
+            when = (r.get("when") or "").strip()
+            how = (r.get("how") or "").strip()
+            lines.append(f"\n{i}. 조건: {when}\n   → {how}")
+    if common:
+        lines.append("\n[공통 규칙 — 어떤 지침을 적용하든 항상 같이 지킨다]\n" + common)
+    return "\n".join(lines).strip()
+
+
+# ── 「AI로 다듬기」(설정 창의 지침·이동 규칙 추가 창) ─────────────────────────
+class RefineError(Exception):
+    """사람에게 그대로 보여줄 한국어 메시지를 담는다."""
+
+
+REFINE_PROMPTS = {
+    "rule": (
+        "너는 파일 자동 이름짓기 프로그램의 지침을 다듬는 도우미다. 사용자가 구어체로 적은 "
+        "'어떤 파일일 때'와 '이름은 이렇게'를, 작은 AI 모델도 헷갈리지 않게 구체적이고 명확한 한국어로 고쳐라. "
+        "뜻을 바꾸거나 새 조건을 지어내지 말고, 이름 형식은 자리 순서가 보이게 밑줄(_)로 이어 쓰고 날짜는 YYYYMMDD 처럼 자릿수를 밝혀라. "
+        "가능하면 how 끝에 '예: ...' 로 완성된 이름 예시 하나를 붙여라. "
+        "반드시 JSON 한 개만 출력: {\"when\": \"...\", \"how\": \"...\"}"
+    ),
+    "move": (
+        "너는 파일 자동 분류 프로그램의 이동 조건을 다듬는 도우미다. 사용자가 구어체로 적은 조건을, "
+        "작은 AI 모델이 파일 내용을 보고 해당 여부를 판단하기 쉽게 구체적인 한 문장의 한국어 명사구로 고쳐라. "
+        "뜻을 바꾸거나 새 조건을 지어내지 마라. 반드시 JSON 한 개만 출력: {\"when\": \"...\"}"
+    ),
+    "common": (
+        "너는 파일 자동 이름짓기 프로그램의 공통 규칙을 다듬는 도우미다. 사용자가 구어체로 적은 규칙을, "
+        "작은 AI 모델이 지키기 쉽게 번호 붙인 짧은 문장들로 고쳐라. 뜻을 바꾸거나 새 규칙을 지어내지 마라. "
+        "반드시 JSON 한 개만 출력: {\"when\": \"...\"} (when 에 다듬은 규칙 전체)"
+    ),
+}
+
+
+def _refine_http_message(code: int) -> str:
+    if code in (401, 403):
+        return f"API 키가 올바르지 않습니다 (HTTP {code}). AI 탭에서 키를 확인해 주세요."
+    if code == 429:
+        return "사용 한도에 걸렸습니다 (HTTP 429). 잠시 뒤 다시 시도해 주세요."
+    if code == 404:
+        return "모델을 찾을 수 없습니다 (HTTP 404). AI 탭에서 다른 모델을 골라 주세요."
+    if code >= 500:
+        return f"AI 서버가 바쁩니다 (HTTP {code}). 잠시 뒤 다시 시도해 주세요."
+    return f"요청이 거절됐습니다 (HTTP {code})."
+
+
+REFINE_SCHEMA = {
+    "type": "object",
+    "properties": {"when": {"type": "string"}, "how": {"type": "string"}},
+    "required": ["when", "how"],
+    "additionalProperties": False,
+}
+
+
+def _simple_complete(entry: dict, system: str, user: str, timeout: int = 30) -> str:
+    """순위 항목 하나로 짧은 JSON 생성(다듬기 전용). 공급자마다 JSON 출력을 강제한다 —
+    강제하지 않으면 문자열 안에 줄바꿈을 그대로 넣은 깨진 JSON 이 가끔 와서 파싱이 실패했다(2026-10-14 실측)."""
+    provider, key, model = entry["provider"], entry["api_key"], entry["model"]
+    if provider == "claude":
+        url = "https://api.anthropic.com/v1/messages"
+        body = {"model": model, "max_tokens": 1000, "system": system,
+                "messages": [{"role": "user", "content": user}],
+                "output_config": {"format": {"type": "json_schema", "schema": REFINE_SCHEMA}}}
+        headers = {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": CLAUDE_API_VERSION}
+    elif provider == "openai":
+        url = "https://api.openai.com/v1/chat/completions"
+        body = {"model": model, "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    else:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+        body = {"systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": {"responseMimeType": "application/json"}}
+        headers = {"Content-Type": "application/json"}
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    if provider == "claude":
+        return "".join(b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text")
+    if provider == "openai":
+        return data["choices"][0]["message"]["content"]
+    return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+
+
+def refine_text(kind: str, when: str, how: str = "") -> dict:
+    """
+    설정 창 「AI로 다듬기」. 저장된 설정의 1순위 키로 한 번 호출해 {"when", "how"?, "model"} 을 돌려준다.
+    실패하면 RefineError(사람에게 보여줄 메시지).
+    """
+    chain = get_ai_chain(load_config())
+    if not chain:
+        raise RefineError("저장된 API 키가 없어요. AI 탭에서 키를 넣고 저장한 뒤에 쓸 수 있어요.")
+    entry = chain[0]
+    # 오늘 날짜를 알려 줘야 예시 이름이 옛 연도(20240315 등)로 안 나온다
+    system = REFINE_PROMPTS[kind] + f" 오늘 날짜는 {datetime.date.today().strftime('%Y-%m-%d')} 이니 예시 날짜도 이 근처로 써라."
+    user = f"어떤 파일일 때: {when.strip()}"
+    if kind == "rule":
+        user += f"\n이름은 이렇게: {how.strip()}"
+    if kind == "common":
+        user = f"공통 규칙:\n{when.strip()}"
+    try:
+        text = _simple_complete(entry, system, user)
+    except urllib.error.HTTPError as e:
+        raise RefineError(_refine_http_message(e.code)) from e
+    except urllib.error.URLError as e:
+        if "timed out" in str(e.reason).lower():
+            raise RefineError("응답 시간이 초과됐습니다. 잠시 뒤 다시 시도해 주세요.") from e
+        raise RefineError("인터넷 연결을 확인해 주세요. AI 서버에 연결하지 못했습니다.") from e
+    except (TimeoutError, OSError) as e:
+        raise RefineError("응답 시간이 초과됐습니다. 잠시 뒤 다시 시도해 주세요.") from e
+    except Exception as e:
+        raise RefineError(f"응답을 읽지 못했습니다 ({e}).") from e
+
+    m = re.search(r"\{.*\}", text or "", re.DOTALL)
+    try:
+        # strict=False: 문자열 안의 날 줄바꿈·탭을 허용한다
+        parsed = json.loads(m.group(0), strict=False) if m else {}
+    except Exception:
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    out_when = (parsed.get("when") or "").strip()
+    if not out_when:
+        raise RefineError("AI 응답이 비어 있거나 형식이 달랐습니다. 다시 시도해 주세요.")
+    result = {"when": out_when, "model": entry["model"]}
+    if kind == "rule":
+        result["how"] = (parsed.get("how") or "").strip() or how.strip()
+    return result
 
 
 def get_source_domain(filepath: str) -> str | None:
@@ -239,7 +503,10 @@ def extract_excel_preview(filepath: str, limit: int) -> str:
     try:
         wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
     except Exception as e:
-        return f"(엑셀을 읽을 수 없음: {e})"
+        # IBK기업은행 등 일부 은행 xlsx 는 스타일 시트에 openpyxl 이 모르는 속성(styleId)이 있어 통째로 실패한다
+        # (2026-10-14 실측: 거래내역·카드청구 엑셀). 셀 값만 필요하니 시트 XML 을 직접 읽는다.
+        raw = _extract_xlsx_preview_raw(filepath, limit)
+        return raw if raw else f"(엑셀을 읽을 수 없음: {e})"
     try:
         lines = []
         for sheet_name in wb.sheetnames[:3]:
@@ -255,6 +522,53 @@ def extract_excel_preview(filepath: str, limit: int) -> str:
         return _truncate("\n".join(lines), limit)
     finally:
         wb.close()  # 예외 발생 시에도 반드시 파일 핸들 해제
+
+
+def _extract_xlsx_preview_raw(filepath: str, limit: int) -> str:
+    """openpyxl 이 못 여는 xlsx 용 대체 경로: zip 안의 sharedStrings·시트 XML 에서 셀 값만 읽는다(앞 3시트·30행)."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    try:
+        with zipfile.ZipFile(filepath) as z:
+            names = z.namelist()
+            shared = []
+            if "xl/sharedStrings.xml" in names:
+                root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+                for si in root.findall("m:si", ns):
+                    shared.append("".join(t.text or "" for t in si.iter(f"{{{ns['m']}}}t")))
+            sheet_titles = []
+            if "xl/workbook.xml" in names:
+                wb_root = ET.fromstring(z.read("xl/workbook.xml"))
+                sheet_titles = [s.get("name") for s in wb_root.findall("m:sheets/m:sheet", ns)]
+            sheet_files = sorted(
+                (n for n in names if re.match(r"xl/worksheets/sheet\d+\.xml$", n)),
+                key=lambda n: int(re.search(r"(\d+)\.xml$", n).group(1)),
+            )
+            lines = []
+            for idx, sf in enumerate(sheet_files[:3]):
+                title = sheet_titles[idx] if idx < len(sheet_titles) else sf.rsplit("/", 1)[-1]
+                lines.append(f"[시트: {title}]")
+                root = ET.fromstring(z.read(sf))
+                rows = root.findall("m:sheetData/m:row", ns)[:30]
+                for row in rows:
+                    vals = []
+                    for cell in row.findall("m:c", ns):
+                        t = cell.get("t")
+                        v = cell.find("m:v", ns)
+                        if t == "s" and v is not None and (v.text or "").isdigit():
+                            i = int(v.text)
+                            vals.append(shared[i] if i < len(shared) else "")
+                        elif t == "inlineStr":
+                            vals.append("".join(x.text or "" for x in cell.iter(f"{{{ns['m']}}}t")))
+                        else:
+                            vals.append(v.text if v is not None and v.text else "")
+                    lines.append(" | ".join(vals))
+                if not rows:
+                    lines.append("(빈 시트)")
+            return _truncate("\n".join(lines), limit) if lines else ""
+    except Exception:
+        return ""
 
 
 def _extract_excel_preview_xls(filepath: str, limit: int) -> str:
@@ -1216,36 +1530,19 @@ def _free_gemini_stages(config: dict) -> list:
 def analyze_file(filepath: str) -> dict | None:
     """설정 파일에서 매번 동적으로 키와 추가 지침을 로드하여 가벼운 한도로 분석을 수행합니다."""
     config = load_config()
-    provider = (config.get("ai_provider") or "gemini").strip().lower()
-    if provider not in AI_PROVIDERS:
-        provider = "gemini"
-    api_key = {
-        "gemini": config.get("gemini_api_key", ""),
-        "openai": config.get("openai_api_key", ""),
-        "claude": config.get("claude_api_key", ""),
-    }[provider].strip()
-
-    # 무료 키가 한도에 막혔을 때 대신 쓸 유료(결제 연동) 키. 비워두면 전환 없이 종전과 동일하게 동작한다.
-    paid_api_key = (config.get("paid_api_key") or "").strip()
-
-    # 유료 쪽 공급자는 따로 고를 수 있다. 비었거나 값이 이상하면 무료와 같은 공급자를 쓴다
-    # (설정 GUI의 "무료와 동일" 선택지가 빈 문자열로 저장된다).
-    paid_provider = (config.get("paid_provider") or "").strip().lower()
-    if paid_provider not in AI_PROVIDERS:
-        paid_provider = provider
+    chain = get_ai_chain(config)
 
     max_output_tokens = int(config.get("max_output_tokens", 99999))
 
     # 3만 자에서 다시 가벼운 2천 자 한도로 강제 제한 조정하여 429 에러 방지
     max_preview_chars = int(config.get("max_preview_chars", 6000))
-    user_rules = config.get("user_rules", "").strip()
+    user_rules = compose_user_rules(config)
     move_rules = config.get("move_rules", []) or []
     filename_format = config.get("filename_format", "").strip() or DEFAULT_FILENAME_FORMAT
 
-    # 유료 키만 넣어둔 경우도 정상 동작해야 하므로 둘 다 비었을 때만 막는다.
-    if not api_key and not paid_api_key:
-        print(f"[경고] {provider} API 키가 공백이거나 로드되지 않았습니다.")
-        _log_error(f"[AI 분석 오류] {os.path.basename(filepath)}: {provider} API 키가 설정되지 않았습니다.")
+    if not chain:
+        print("[경고] AI 순위에 키가 하나도 없습니다.")
+        _log_error(f"[AI 분석 오류] {os.path.basename(filepath)}: API 키가 설정되지 않았습니다. (설정 → AI 탭)")
         return None
 
     dirpath, fullname = os.path.split(filepath)
@@ -1290,25 +1587,33 @@ def analyze_file(filepath: str) -> dict | None:
             "이 경향은 참고만 하고, 위의 사용자 정의 추가 지침이나 명백한 파일 내용과 충돌하면 그쪽을 우선해."
         )
 
-    call_fn, quota_key = _build_call_fn(provider, config)
-    paid_call_fn, paid_quota_key = _build_call_fn(paid_provider, config)
-
-    # 무료 키 → 유료 키 순서로 시도할 계획을 세운다. 각 단계는 자기 공급자의 호출 함수를 갖는다
-    # (유료 공급자를 따로 고를 수 있으므로 호출 함수가 서로 다를 수 있다).
-    # 오늘 이미 무료 일일 한도가 소진된 게 확인됐고 유료 키가 있으면 무료 키는 아예 건너뛴다.
-    # 각 단계: (라벨, 키, 공급자, 호출함수, 한도키). Gemini 무료는 모델별 한도라 모델을 바꿔 가며 여러 단계를 둔다.
+    # AI 순위대로 시도할 계획을 세운다. 각 단계: (라벨, 키, 공급자/모델, 호출함수, 한도키).
+    # Gemini 항목은 한도가 모델별이라 고른 모델이 막히면 다른 Gemini 모델로 돌린다(gemini_model_rotation).
+    # 한도키에 키 끝 6자리를 넣는다 — 같은 공급자라도 키(프로젝트)가 다르면 한도가 따로다.
+    rotation = config.get("gemini_model_rotation", True)
     key_plan = []
-    if api_key:
-        if provider == "gemini":
-            for m, fn_m, qk in _free_gemini_stages(config):
-                key_plan.append(("무료", api_key, f"gemini/{m}", fn_m, qk))
-            if not key_plan:
-                _log_error(f"[무료 한도 소진] {fullname}: 오늘 무료 Gemini 모델 한도를 모두 썼습니다"
-                           + (" — 유료 키로 처리합니다." if paid_api_key else ". (내일 자동으로 다시 시도)"))
-        elif not (paid_api_key and is_free_quota_exhausted(quota_key)):
-            key_plan.append(("무료", api_key, provider, call_fn, quota_key))
-    if paid_api_key:
-        key_plan.append(("유료", paid_api_key, paid_provider, paid_call_fn, paid_quota_key))
+    for rank, entry in enumerate(chain, 1):
+        label = f"{rank}순위"
+        e_provider, e_key, e_model = entry["provider"], entry["api_key"], entry["model"]
+        fp = e_key[-6:]
+        if e_provider == "gemini":
+            models = [e_model] + ([m for m in GEMINI_FALLBACK_ORDER if m != e_model] if rotation else [])
+            added = 0
+            for m in models:
+                qk = f"gemini:{m}#{fp}"
+                if is_free_quota_exhausted(qk):
+                    continue
+                key_plan.append((label, e_key, f"gemini/{m}", functools.partial(_call_gemini, model=m), qk))
+                added += 1
+            if not added:
+                _log_error(f"[한도 소진] {fullname}: {label} Gemini 모델 한도를 오늘 모두 썼습니다. (내일 자동으로 다시 시도)")
+        else:
+            qk = f"{e_provider}:{e_model}#{fp}"
+            if is_free_quota_exhausted(qk):
+                _log_error(f"[한도 소진] {fullname}: {label} {e_provider}/{e_model} 오늘 한도 소진 — 건너뜁니다.")
+                continue
+            fn = functools.partial(_call_claude, model=e_model) if e_provider == "claude" else _call_openai
+            key_plan.append((label, e_key, f"{e_provider}/{e_model}", fn, qk))
 
     parsed = usage = None
     for i, (key_label, key_value, key_provider, key_call_fn, stage_qk) in enumerate(key_plan):
@@ -1317,22 +1622,22 @@ def analyze_file(filepath: str) -> dict | None:
             fullname, key_provider, key_label,
         )
         if status == "ok":
-            if key_label == "유료":
-                total = count_paid_call(paid_quota_key)
-                _log_error(f"[유료 키 사용] {fullname}: {paid_quota_key} - 오늘 유료 호출 누적 {total}건")
+            if key_label != "1순위":
+                total = count_paid_call(stage_qk)
+                _log_error(f"[{key_label}로 처리] {fullname}: {key_provider} - 오늘 이 단계 누적 {total}건")
             elif i > 0:
                 _log_error(f"[다른 모델로 처리] {fullname}: {key_provider}")
             break
 
-        # 한도(429)·과부하(503)로 막힌 경우에만 다음 단계(다음 무료 모델 → 유료 키)로 넘어간다.
+        # 한도(429)·과부하(503)·시간 초과로 막힌 경우에만 다음 단계(다른 모델 → 다음 순위)로 넘어간다.
         # 401/400 같은 설정 오류는 모델·키를 바꿔도 성격이 다르므로 괜히 소모하지 않고 여기서 끝낸다.
-        if key_label == "무료" and status in ("quota_day", "quota_minute", "unavailable"):
+        if status in ("quota_day", "quota_minute", "unavailable"):
             if status == "quota_day":
                 mark_free_quota_exhausted(stage_qk)
-                _log_error(f"[무료 한도 소진] {stage_qk}: 오늘은 이 모델을 건너뜁니다. (내일 자동으로 다시 시도)")
+                _log_error(f"[한도 소진] {stage_qk}: 오늘은 이 단계를 건너뜁니다. (내일 자동으로 다시 시도)")
             if i + 1 < len(key_plan):
                 nxt = key_plan[i + 1]
-                _log_error(f"[다음 단계로 전환] {fullname}: {key_provider} {status} → {nxt[0]} {nxt[2]}")
+                _log_error(f"[다음 단계로 전환] {fullname}: {key_label} {key_provider} {status} → {nxt[0]} {nxt[2]}")
             continue
 
         return None
@@ -1361,7 +1666,12 @@ def analyze_file(filepath: str) -> dict | None:
         summary = clean(parsed.get("summary", ""))
         site = clean(parsed.get("site", ""))
         if summary:
-            suggested_name = build_filename_from_format(filename_format, today, summary, site)
+            suggested_name = build_filename_from_format(
+                filename_format, today, summary, site,
+                time=datetime.datetime.now().strftime("%H%M"),
+                original=clean(basename),
+                date_format=config.get("date_format") or DEFAULT_DATE_FORMAT,
+            )
 
     # 장수는 모델 판단에 맡기지 않고 실제 PDF 페이지 수로 마지막에 덮는다.
     if suggested_name and ext in PDF_EXTS:
