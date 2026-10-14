@@ -141,7 +141,11 @@ def show_settings_gui():
 
     config = load_config()
 
-    ctk.set_appearance_mode("system")
+    # 화면 모드: 설정값(appearance_mode) — system 이면 윈도우 다크/라이트 설정을 따른다
+    APPEARANCE_UI = {"system": "시스템", "light": "라이트", "dark": "다크"}
+    APPEARANCE_UI_REV = {v: k for k, v in APPEARANCE_UI.items()}
+    appearance_state = {"v": config.get("appearance_mode") if config.get("appearance_mode") in APPEARANCE_UI else "system"}
+    ctk.set_appearance_mode(appearance_state["v"])
     root = ctk.CTk()
     root.title("AutoRename 설정")
     root.attributes("-topmost", True)
@@ -357,6 +361,13 @@ def show_settings_gui():
     label(row, "초", 13, color=SUB).pack(side="right", padx=(6, 0))
     ent_sec = entry(row, str(config.get("countdown_seconds", 3)), width=60, justify="center")
     ent_sec.pack(side="right")
+
+    def change_appearance(ui):
+        appearance_state["v"] = APPEARANCE_UI_REV[ui]
+        ctk.set_appearance_mode(appearance_state["v"])   # 누르는 즉시 바뀐다(저장하면 다음에도 유지)
+
+    c = card(pg, "화면 모드", "시스템을 고르면 윈도우의 다크·라이트 설정을 따라갑니다.")
+    segmented(c, list(APPEARANCE_UI.values()), APPEARANCE_UI[appearance_state["v"]], change_appearance).pack(fill="x")
 
     # =========================================================================
     # 탭 2. AI — 1·2·3순위
@@ -908,6 +919,7 @@ def show_settings_gui():
             "filename_format": fmt_var.get().strip() or DEFAULT_FILENAME_FORMAT,
             "date_format": date_fmt_state["v"],
             "move_rules": [dict(r) for r in move_state],
+            "appearance_mode": appearance_state["v"],
         })
         new_config.update(chain_to_legacy(chain, config))          # 1.3.x 가 읽는 옛 AI 칸
         new_config["user_rules"] = compose_user_rules(new_config)  # 1.3.x 가 읽는 옛 지침 칸

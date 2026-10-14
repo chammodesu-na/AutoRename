@@ -195,6 +195,7 @@ def load_config() -> dict:
         # 비어 있으면 구버전 user_rules(통짜 글)를 그대로 쓴다(compose_user_rules 참고).
         "naming_rules": [],
         "common_rules": "",          # 2.0.0~ 모든 파일에 항상 같이 적용하는 지침
+        "appearance_mode": "system", # 2.0.1~ 설정 창 화면 모드: system / light / dark
     }
     if not os.path.exists(CONFIG_PATH):
         try:

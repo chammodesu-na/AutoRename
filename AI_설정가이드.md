@@ -92,6 +92,7 @@ AI 에게는 이 둘을 합쳐 이런 글로 보낸다:
 |---|---|
 | `watch_folders` | 감시할 폴더 목록 |
 | `countdown_seconds` | 이름 바꾸기 전 알림을 띄우고 기다리는 초 |
+| `appearance_mode` | 설정 창 화면 모드: `system`(윈도우 설정 따름) / `light` / `dark` |
 | `max_output_tokens`, `max_preview_chars` | 고급. 파일 내용을 AI 에 얼마나 보낼지. 특별한 이유 없으면 두기 |
 
 ### 구버전 호환 (직접 고치지 말 것)
