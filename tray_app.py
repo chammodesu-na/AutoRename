@@ -124,6 +124,7 @@ def show_settings_gui():
     """독립된 프로세스로 실행되어 스레드 락 없이 안전하게 구동되는 환경설정 GUI 창"""
     from file_namer import (
         load_config, save_config, DEFAULT_FILENAME_FORMAT, AI_PROVIDERS, DEFAULT_GEMINI_MODEL,
+        DEFAULT_CLAUDE_MODEL,
     )
 
     config = load_config()
@@ -296,13 +297,33 @@ def show_settings_gui():
     ent_claude_key.grid(row=4, column=1, sticky="ew", padx=10, pady=6)
     ent_claude_key.insert(0, config.get("claude_api_key", ""))
 
+    # Claude 모델 선택 (2026-10-14 추가). 목록에 없는 값이 config 에 있으면 기본값으로 보인다.
+    CLAUDE_MODEL_LABELS = {
+        "claude-haiku-5-5": "Claude Haiku 5.5 (가장 싸고 빠름)",
+        "claude-sonnet-5-5": "Claude Sonnet 5.5 (최신 Sonnet)",
+        "claude-sonnet-5": "Claude Sonnet 5 (기본)",
+        "claude-opus-5-5": "Claude Opus 5.5 (가장 똑똑함, 비쌈)",
+    }
+    CLAUDE_MODEL_LABELS_REV = {v: k for k, v in CLAUDE_MODEL_LABELS.items()}
+    tk.Label(fields_frame, text="Claude 모델 :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=5, column=0, sticky="w", pady=6)
+    style.configure("ClaudeModel.TCombobox", fieldbackground=bg_entry, background=bg_entry, foreground=fg_white)
+    cmb_claude_model = ttk.Combobox(
+        fields_frame, values=list(CLAUDE_MODEL_LABELS.values()), state="readonly",
+        style="ClaudeModel.TCombobox",
+    )
+    current_claude_model = config.get("claude_model", DEFAULT_CLAUDE_MODEL)
+    if current_claude_model not in CLAUDE_MODEL_LABELS:
+        current_claude_model = DEFAULT_CLAUDE_MODEL
+    cmb_claude_model.set(CLAUDE_MODEL_LABELS[current_claude_model])
+    cmb_claude_model.grid(row=5, column=1, sticky="ew", padx=10, pady=6)
+
     # 유료(결제 연동) 키 — 무료 키가 한도에 걸리면 자동으로 이 키로 넘어간다. 비워두면 전환 없음.
     # 공급자는 따로 고를 수 있고, "무료와 동일"이면 빈 문자열로 저장돼 위 ai_provider를 그대로 따른다.
     PAID_PROVIDER_SAME = "무료와 동일"
     PAID_PROVIDER_LABELS = {"": PAID_PROVIDER_SAME, **PROVIDER_LABELS}
     PAID_PROVIDER_LABELS_REV = {v: k for k, v in PAID_PROVIDER_LABELS.items()}
 
-    tk.Label(fields_frame, text="유료 공급자 :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=5, column=0, sticky="w", pady=6)
+    tk.Label(fields_frame, text="유료 공급자 :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=6, column=0, sticky="w", pady=6)
     style.configure("PaidProvider.TCombobox", fieldbackground=bg_entry, background=bg_entry, foreground=fg_white)
     cmb_paid_provider = ttk.Combobox(
         fields_frame, values=list(PAID_PROVIDER_LABELS.values()), state="readonly",
@@ -312,11 +333,11 @@ def show_settings_gui():
     if current_paid_provider not in PAID_PROVIDER_LABELS:
         current_paid_provider = ""
     cmb_paid_provider.set(PAID_PROVIDER_LABELS[current_paid_provider])
-    cmb_paid_provider.grid(row=5, column=1, sticky="ew", padx=10, pady=6)
+    cmb_paid_provider.grid(row=6, column=1, sticky="ew", padx=10, pady=6)
 
-    tk.Label(fields_frame, text="유료 API Key :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=6, column=0, sticky="w", pady=6)
+    tk.Label(fields_frame, text="유료 API Key :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=7, column=0, sticky="w", pady=6)
     ent_paid_key = tk.Entry(fields_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat")
-    ent_paid_key.grid(row=6, column=1, sticky="ew", padx=10, pady=6)
+    ent_paid_key.grid(row=7, column=1, sticky="ew", padx=10, pady=6)
     ent_paid_key.insert(0, config.get("paid_api_key", ""))
     lbl_paid_desc = tk.Label(
         fields_frame,
@@ -326,12 +347,12 @@ def show_settings_gui():
         fg="#9aa0a6", bg=bg_dark, font=("Malgun Gothic", 8),
     )
     register_adaptive(lbl_paid_desc)
-    lbl_paid_desc.grid(row=7, column=1, sticky="ew", padx=10)
+    lbl_paid_desc.grid(row=8, column=1, sticky="ew", padx=10)
 
     # 지연 타이머 (초)
-    tk.Label(fields_frame, text="카운트다운(초) :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=8, column=0, sticky="w", pady=6)
+    tk.Label(fields_frame, text="카운트다운(초) :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=9, column=0, sticky="w", pady=6)
     ent_sec = tk.Entry(fields_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat", width=10)
-    ent_sec.grid(row=8, column=1, sticky="w", padx=10, pady=6)
+    ent_sec.grid(row=9, column=1, sticky="w", padx=10, pady=6)
     ent_sec.insert(0, str(config.get("countdown_seconds", 3)))
 
     # 감시 대상 폴더 (여러 개)
@@ -562,6 +583,7 @@ def show_settings_gui():
             "gemini_api_key": ent_gemini_key.get().strip(),
             "openai_api_key": ent_openai_key.get().strip(),
             "claude_api_key": ent_claude_key.get().strip(),
+            "claude_model": CLAUDE_MODEL_LABELS_REV.get(cmb_claude_model.get(), DEFAULT_CLAUDE_MODEL),
             "paid_api_key": ent_paid_key.get().strip(),
             "paid_provider": PAID_PROVIDER_LABELS_REV.get(cmb_paid_provider.get(), ""),
             "watch_folders": folders,

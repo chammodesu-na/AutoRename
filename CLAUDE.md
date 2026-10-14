@@ -490,3 +490,12 @@ pythonw.exe tray\_app.py
 
 
 
+
+
+
+\## Claude 응답 파싱 (2026-10-14)
+
+
+
+\- `_call_claude` 는 `content[0]["text"]` 를 가정하면 안 된다 — 최신 모델은 text 아닌 블록이 먼저 올 수 있어 `'text'` KeyError 로 "API 호출 실패" 가 찍혔다(HTTP 200, 키는 정상). text 블록을 골라 쓰도록 수정, 없으면 블록 종류·stop_reason 을 로그에 남긴다. 실측 비용 약 $0.03/파일(claude-sonnet-5).
+\- Claude 모델 선택 추가(2026-10-14): `config["claude_model"]` + 설정창 「Claude 모델」 드롭다운(Haiku 5.5 / Sonnet 5.5 / Sonnet 5(기본) / Opus 5.5). 4개 ID 모두 /v1/models 로 존재 확인.

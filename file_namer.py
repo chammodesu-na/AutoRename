@@ -44,7 +44,11 @@ GEMINI_MODEL_CHOICES = (
 # 기존 사용자의 config에는 이미 gemini_model 값이 들어 있으므로 영향받지 않는다(신규 설치에만 적용).
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 OPENAI_MODEL = "gpt-5.6-luna"          # OpenAI 저비용/고속 모델 (2026-07 기준)
-CLAUDE_MODEL = "claude-sonnet-5"        # 사용자 요청으로 Haiku 대신 Sonnet 5 사용
+# Claude 모델도 config["claude_model"]로 고른다(설정 GUI 드롭다운, 2026-10-14 사용자 요청).
+# 기본값은 종전 고정값(Sonnet 5) 그대로 — 기존 config엔 키가 없으므로 이 값으로 폴백된다.
+CLAUDE_MODEL_CHOICES = ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5")
+DEFAULT_CLAUDE_MODEL = "claude-sonnet-5"
+CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL     # 하위호환용 별칭
 CLAUDE_API_VERSION = "2023-06-01"       # Anthropic Messages API 버전 헤더 (안정적으로 유지되는 값)
 AI_PROVIDERS = ("gemini", "openai", "claude")
 
@@ -144,6 +148,7 @@ def load_config() -> dict:
         "gemini_api_key": "",
         "openai_api_key": "",
         "claude_api_key": "",
+        "claude_model": DEFAULT_CLAUDE_MODEL,
         # 무료 키가 한도(429)에 막혔을 때 대신 쓸 결제 연동 키. 비워두면 전환 없이 종전과 동일.
         "paid_api_key": "",
         # 유료 키를 쓸 공급자. 빈 문자열이면 위 ai_provider와 같은 공급자를 쓴다.
@@ -1064,11 +1069,13 @@ def _call_openai(system_prompt: str, parts: list, api_key: str, max_output_token
     return parsed, usage
 
 
-def _call_claude(system_prompt: str, parts: list, api_key: str, max_output_tokens: int) -> tuple[dict, dict]:
-    """Claude Messages API 호출 (output_config.format으로 구조화 출력 강제)."""
+def _call_claude(system_prompt: str, parts: list, api_key: str, max_output_tokens: int,
+                  model: str = DEFAULT_CLAUDE_MODEL) -> tuple[dict, dict]:
+    """Claude Messages API 호출 (output_config.format으로 구조화 출력 강제).
+    model: config["claude_model"]로 사용자가 선택한 모델."""
     content = _parts_to_claude_content(parts)
     body = json.dumps({
-        "model": CLAUDE_MODEL,
+        "model": model,
         "max_tokens": max(256, min(int(max_output_tokens), 8192)),
         "system": system_prompt,
         "messages": [{"role": "user", "content": content}],
@@ -1092,7 +1099,13 @@ def _call_claude(system_prompt: str, parts: list, api_key: str, max_output_token
     with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
         data = json.loads(resp.read().decode("utf-8"))
 
-    text = data["content"][0]["text"].strip()
+    # 최신 모델은 content[0] 에 thinking 등 text 아닌 블록이 먼저 올 수 있다 — text 블록을 찾아 쓴다
+    blocks = data.get("content") or []
+    texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+    if not texts:
+        raise ValueError(f"AI 응답에 text 블록 없음 - stop_reason={data.get('stop_reason')} "
+                         f"blocks={[b.get('type') for b in blocks]}")
+    text = "".join(texts).strip()
     try:
         parsed = json.loads(text)
     except Exception as e:
@@ -1175,7 +1188,10 @@ def _build_call_fn(provider: str, config: dict):
     if provider == "gemini":
         gemini_model = config.get("gemini_model", DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
         return functools.partial(_call_gemini, model=gemini_model), f"{provider}:{gemini_model}"
-    return {"openai": _call_openai, "claude": _call_claude}[provider], provider
+    if provider == "claude":
+        claude_model = config.get("claude_model", DEFAULT_CLAUDE_MODEL) or DEFAULT_CLAUDE_MODEL
+        return functools.partial(_call_claude, model=claude_model), provider
+    return {"openai": _call_openai}[provider], provider
 
 
 def _free_gemini_stages(config: dict) -> list:
