@@ -499,3 +499,4 @@ pythonw.exe tray\_app.py
 
 \- `_call_claude` 는 `content[0]["text"]` 를 가정하면 안 된다 — 최신 모델은 text 아닌 블록이 먼저 올 수 있어 `'text'` KeyError 로 "API 호출 실패" 가 찍혔다(HTTP 200, 키는 정상). text 블록을 골라 쓰도록 수정, 없으면 블록 종류·stop_reason 을 로그에 남긴다. 실측 비용 약 $0.03/파일(claude-sonnet-5).
 \- Claude 모델 선택 추가(2026-10-14): `config["claude_model"]` + 설정창 「Claude 모델」 드롭다운(Haiku 5.5 / Sonnet 5.5 / Sonnet 5(기본) / Opus 5.5). 4개 ID 모두 /v1/models 로 존재 확인.
+\- 설정창 개편(2026-10-14, v1.3.3): 탭 3개(일반/AI/규칙) + 하단 고정 저장·취소(Ctrl+S). AI 탭은 고른 공급자의 키·모델만 표시, 유료 키는 「고급 설정」 접기, API 키는 가림+「보기」. 저장 시 화면에 없는 설정 키도 보존(dict(config) 위에 update). 함정: ①vista 테마는 콤보박스 색 무시 → clam ②Text 기본 80자 폭이 창을 밀어냄 → width=1 + 스크롤바 먼저 pack ③숨은 탭 캔버스 창 폭은 같은 값 재지정이 무시됨 → 다른 값 넣고 after(1)로 원복.

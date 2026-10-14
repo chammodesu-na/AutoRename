@@ -121,10 +121,16 @@ def run_update_check(on_installing):
 
 
 def show_settings_gui():
-    """독립된 프로세스로 실행되어 스레드 락 없이 안전하게 구동되는 환경설정 GUI 창"""
+    """독립된 프로세스로 실행되어 스레드 락 없이 안전하게 구동되는 환경설정 GUI 창
+
+    2026-10-14 개편: 한 장짜리 긴 스크롤 → 탭 3개(일반 / AI / 규칙) + 하단 고정 저장 버튼.
+    - AI 탭은 고른 공급자의 키·모델만 보인다(나머지 공급자 칸은 숨기되 값은 그대로 저장).
+    - 유료 키는 「고급 설정」 아래로 접고, API 키는 가려서 「보기」를 눌렀을 때만 보인다.
+    - 저장할 때 화면에 없는 설정 키(gemini_model_rotation 등)도 지우지 않고 그대로 둔다.
+    """
     from file_namer import (
         load_config, save_config, DEFAULT_FILENAME_FORMAT, AI_PROVIDERS, DEFAULT_GEMINI_MODEL,
-        DEFAULT_CLAUDE_MODEL,
+        DEFAULT_CLAUDE_MODEL, OPENAI_MODEL,
     )
 
     config = load_config()
@@ -135,136 +141,268 @@ def show_settings_gui():
     root.attributes("-topmost", True)
 
     # ---- 화면 크기에 맞춰 창 크기/위치를 동적으로 결정 ----
-    # 고정 630px 높이가 작은 화면(특히 노트북)에서 작업표시줄까지 빼면
-    # 화면 밖으로 밀려나 저장 버튼이 안 보이는 문제가 있었음 -> 화면 크기 기준으로 제한.
-    desired_w, desired_h = 540, 630
+    # 작은 화면(노트북)에서 작업표시줄까지 빼면 창이 화면 밖으로 밀려나던 문제가 있어 화면 크기 기준으로 제한한다.
+    desired_w, desired_h = 560, 620
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
-
-    win_w = min(desired_w, sw - 80)
-    win_h = min(desired_h, sh - 120)  # 작업표시줄/타이틀바 여유 확보
-    win_w = max(win_w, 420)   # 너무 작아지지 않도록 최소값 보장
-    win_h = max(win_h, 360)
-
+    win_w = max(min(desired_w, sw - 80), 440)
+    win_h = max(min(desired_h, sh - 120), 420)
     x = max((sw - win_w) // 2, 0)
     y = max((sh - win_h) // 2, 0)
     root.geometry(f"{win_w}x{win_h}+{x}+{y}")
-
-    # 창 크기 조절 허용 (이전에는 False로 막혀 있어서 화면보다 큰 창을 줄일 방법이 없었음)
     root.resizable(True, True)
-    root.minsize(420, 360)
+    root.minsize(440, 420)
 
-    # 스타일 정의
+    # ---- 색·글꼴 ----
     fg_mint = "#6ee7b7"
     bg_dark = "#1e1e22"
     bg_entry = "#2a2a2f"
+    bg_button = "#3a3a40"
     fg_white = "#f2f2f2"
     sub_color = "#9a9aa2"
     DANGER_FG = "#ff8585"
 
-    header_font = ("Malgun Gothic", 15, "bold")
+    header_font = ("Malgun Gothic", 14, "bold")
     label_font = ("Malgun Gothic", 10, "bold")
+    section_font = ("Malgun Gothic", 10, "bold")
     desc_font = ("Malgun Gothic", 8)
+    body_font = ("Malgun Gothic", 10)
 
-    # ---- 스크롤 가능한 컨테이너 ----
-    # 창이 화면보다 작게 강제돼도 내용이 넘치면 마우스 휠로 끝까지 볼 수 있게 함.
-    outer_canvas = tk.Canvas(root, bg=bg_dark, highlightthickness=0)
-    outer_canvas.pack(side="left", fill="both", expand=True)
+    # ---- ttk 스타일 ----
+    # 윈도우 기본 테마(vista)는 콤보박스 fieldbackground 를 무시해서 흰 바탕에 흰 글씨(#f2f2f2)가 되어
+    # 포커스를 잃으면 글자가 거의 안 보였다(2026-10-14). clam 은 색 지정이 먹으므로 이걸 쓰고,
+    # readonly·focus 상태별 색까지 고정한다.
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure(
+        "TCombobox", fieldbackground=bg_entry, background=bg_button, foreground=fg_white,
+        arrowcolor=fg_white, bordercolor=bg_button, lightcolor=bg_entry, darkcolor=bg_entry,
+        selectbackground=bg_entry, selectforeground=fg_white, padding=4,
+    )
+    style.map(
+        "TCombobox",
+        fieldbackground=[("readonly", bg_entry), ("disabled", bg_dark)],
+        foreground=[("readonly", fg_white), ("disabled", sub_color)],
+        selectbackground=[("readonly", bg_entry)],
+        selectforeground=[("readonly", fg_white)],
+        background=[("active", "#4a4a52"), ("pressed", "#4a4a52")],
+        bordercolor=[("focus", fg_mint)],
+    )
+    # 펼친 목록(popdown)은 tk Listbox 라 option DB 로 색을 준다
+    root.option_add("*TCombobox*Listbox.background", bg_entry)
+    root.option_add("*TCombobox*Listbox.foreground", fg_white)
+    root.option_add("*TCombobox*Listbox.selectBackground", fg_mint)
+    root.option_add("*TCombobox*Listbox.selectForeground", bg_dark)
+    root.option_add("*TCombobox*Listbox.font", body_font)
 
-    scrollbar = tk.Scrollbar(root, orient="vertical", command=outer_canvas.yview)
-    scrollbar.pack(side="right", fill="y")
-    outer_canvas.configure(yscrollcommand=scrollbar.set)
+    # clam 은 탭 본문 둘레에 밝은 테두리를 그리므로 테두리 색을 전부 배경색으로 지운다
+    style.configure(
+        "TNotebook", background=bg_dark, borderwidth=0, tabmargins=(24, 0, 24, 0),
+        bordercolor=bg_dark, lightcolor=bg_dark, darkcolor=bg_dark,
+    )
+    style.configure(
+        "TNotebook.Tab", background=bg_entry, foreground=sub_color, padding=(18, 7),
+        borderwidth=0, font=label_font, lightcolor=bg_entry, bordercolor=bg_dark,
+    )
+    style.map(
+        "TNotebook.Tab",
+        background=[("selected", bg_dark), ("active", "#34343a")],
+        foreground=[("selected", fg_mint), ("active", fg_white)],
+        lightcolor=[("selected", bg_dark)],
+    )
 
-    content = tk.Frame(outer_canvas, bg=bg_dark)
-    content_window = outer_canvas.create_window((0, 0), window=content, anchor="nw")
+    # ---- 공통 위젯 도우미 ----
+    def flat_button(parent, text, command, fg=fg_white, primary=False, **kw):
+        if primary:
+            return tk.Button(
+                parent, text=text, command=command, bg=fg_mint, fg=bg_dark,
+                font=("Malgun Gothic", 10, "bold"), relief="flat", cursor="hand2",
+                activebackground="#58d0a3", activeforeground=bg_dark, padx=18, pady=6, **kw,
+            )
+        return tk.Button(
+            parent, text=text, command=command, bg=bg_button, fg=fg, relief="flat", cursor="hand2",
+            activebackground=bg_entry, activeforeground=fg, padx=10, pady=3, **kw,
+        )
 
-    def on_content_configure(event):
-        outer_canvas.configure(scrollregion=outer_canvas.bbox("all"))
+    def flat_entry(parent, **kw):
+        return tk.Entry(
+            parent, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat",
+            font=body_font, highlightthickness=1, highlightbackground=bg_button,
+            highlightcolor=fg_mint, **kw,
+        )
 
-    def on_canvas_configure(event):
-        # 컨텐츠 프레임 너비를 캔버스 너비에 맞춰서 가로로 꽉 차게 유지
-        outer_canvas.itemconfig(content_window, width=event.width)
+    def wrap_label(parent, text, fg=sub_color, font=desc_font):
+        """창 폭에 맞춰 자동 줄바꿈되는 안내문. (wraplength=0 이면 줄바꿈 없이 잘려 나간다)"""
+        lbl = tk.Label(parent, text=text, fg=fg, bg=bg_dark, font=font, justify="left", anchor="w")
 
-    content.bind("<Configure>", on_content_configure)
-    outer_canvas.bind("<Configure>", on_canvas_configure)
+        def _rewrap(event):
+            width = max(event.width - 4, 120)
+            # 같은 값을 다시 넣으면 <Configure>가 또 돌아 무한 반복이 되므로 바뀔 때만 적용한다
+            if lbl.cget("wraplength") != width:
+                lbl.configure(wraplength=width)
+
+        lbl.bind("<Configure>", _rewrap)
+        return lbl
+
+    def section(parent, title, desc=None, top=18):
+        tk.Label(parent, text=title, fg=fg_mint, bg=bg_dark, font=section_font).pack(anchor="w", pady=(top, 4))
+        if desc:
+            wrap_label(parent, desc).pack(anchor="w", fill="x", pady=(0, 6))
+
+    def secret_entry(parent, value):
+        """API 키 입력칸. 기본은 가려 두고 「보기」를 누르면 보인다."""
+        row = tk.Frame(parent, bg=bg_dark)
+        ent = flat_entry(row, show="●")
+        ent.pack(side="left", fill="x", expand=True, ipady=3)
+        ent.insert(0, value or "")
+
+        def toggle():
+            hidden = ent.cget("show") != ""
+            ent.configure(show="" if hidden else "●")
+            btn.configure(text="숨기기" if hidden else "보기")
+
+        btn = flat_button(row, "보기", toggle, width=5)
+        btn.pack(side="left", padx=(6, 0))
+        return row, ent
+
+    def make_listbox(parent, height=5):
+        frame = tk.Frame(parent, bg=bg_dark)
+        lst = tk.Listbox(
+            frame, bg=bg_entry, fg=fg_white, relief="flat", font=body_font,
+            selectbackground=fg_mint, selectforeground=bg_dark,
+            highlightthickness=1, highlightbackground=bg_button, highlightcolor=fg_mint,
+            height=height, activestyle="none", selectmode="extended",
+        )
+        lst.pack(side="left", fill="both", expand=True)
+        sb = tk.Scrollbar(frame, orient="vertical", command=lst.yview)
+        sb.pack(side="right", fill="y")
+        lst.configure(yscrollcommand=sb.set)
+        return frame, lst
+
+    # ---- 레이아웃: 헤더 / 탭 / 하단 고정 버튼줄 ----
+    header = tk.Frame(root, bg=bg_dark)
+    header.pack(side="top", fill="x", padx=24, pady=(16, 10))
+    tk.Label(header, text="AutoRename 설정", fg=fg_mint, bg=bg_dark, font=header_font).pack(side="left")
+    tk.Label(header, text=f"v{updater.APP_VERSION}", fg=sub_color, bg=bg_dark, font=desc_font).pack(side="left", padx=(8, 0), pady=(6, 0))
+
+    bottom = tk.Frame(root, bg=bg_entry)
+    bottom.pack(side="bottom", fill="x")
+
+    nb = ttk.Notebook(root)
+    nb.pack(side="top", fill="both", expand=True)
+
+    # 탭마다 스크롤되는 페이지. 내용이 창보다 짧으면 스크롤바를 숨긴다.
+    page_canvases = []
+    page_syncs = []
+    # 탭을 바꾸면 그 탭이 처음 제 크기를 갖게 되므로 폭·스크롤바를 다시 맞춘다
+    nb.bind("<<NotebookTabChanged>>", lambda e: root.after_idle(lambda: [s() for s in page_syncs]))
+
+    def make_page(title):
+        page = tk.Frame(nb, bg=bg_dark)
+        cv = tk.Canvas(page, bg=bg_dark, highlightthickness=0)
+        sb = tk.Scrollbar(page, orient="vertical", command=cv.yview)
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(cv, bg=bg_dark)
+        body = tk.Frame(inner, bg=bg_dark)
+        body.pack(fill="both", expand=True, padx=24, pady=(4, 16))
+        win = cv.create_window((0, 0), window=inner, anchor="nw")
+
+        # 폭 맞추기와 스크롤바 판단을 나눈다. 프레임 <Configure> 에서 폭까지 건드리면 폭 지정이 먹지 않았다
+        # (실측: 캔버스 항목 폭 539 인데 프레임은 요청폭 707 그대로 → 「규칙」 탭 오른쪽이 잘림).
+        # 또 탭이 숨어 있던 동안 프레임이 요청폭으로 커지면, 같은 폭 값을 다시 넣어도 Tk 가 무시한다.
+        # 그럴 땐 다른 값을 한 번 넣고 다음 이벤트 때 원래 값을 넣어야 다시 적용된다(같은 호출 안에서 두 번 넣으면 소용없음).
+        def _fit_width(_event=None):
+            cw = cv.winfo_width()
+            if cw <= 1:
+                return
+            cv.itemconfig(win, width=cw)
+            if inner.winfo_width() not in (cw, 1):
+                cv.itemconfig(win, width=cw - 1)
+                root.after(1, lambda: cv.itemconfig(win, width=cv.winfo_width()))
+
+        def _sync_scroll(_event=None):
+            # 숨은 탭은 높이가 1px 이라 판단하면 안 된다(스크롤바가 괜히 붙는다)
+            ch = cv.winfo_height()
+            if ch <= 1:
+                return
+            cv.configure(scrollregion=cv.bbox("all"))
+            needs = inner.winfo_reqheight() > ch + 1
+            if needs and not sb.winfo_ismapped():
+                sb.pack(side="right", fill="y")
+            elif not needs and sb.winfo_ismapped():
+                sb.pack_forget()
+                cv.yview_moveto(0)
+
+        inner.bind("<Configure>", _sync_scroll)
+        cv.bind("<Configure>", lambda e: (_fit_width(), _sync_scroll()))
+        page_syncs.append(lambda: (_fit_width(), _sync_scroll()))
+        nb.add(page, text=title)
+        page_canvases.append((cv, inner))
+        return body
 
     def on_mousewheel(event):
-        outer_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        # 지침 입력칸·목록 위에서는 그 위젯이 스스로 스크롤하게 둔다
+        if isinstance(event.widget, (tk.Text, tk.Listbox)):
+            return
+        try:
+            cv, inner = page_canvases[nb.index("current")]
+        except Exception:
+            return
+        if inner.winfo_reqheight() > cv.winfo_height():
+            cv.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-    outer_canvas.bind_all("<MouseWheel>", on_mousewheel)
+    root.bind_all("<MouseWheel>", on_mousewheel)
 
     def on_close():
-        outer_canvas.unbind_all("<MouseWheel>")
+        root.unbind_all("<MouseWheel>")
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 
-    # 이제부터 위젯은 root가 아니라 content 위에 배치한다.
+    # =========================================================================
+    # 탭 1. 일반 — 감시 폴더, 카운트다운
+    # =========================================================================
+    tab_general = make_page("  일반  ")
 
-    # 제목 헤더
-    lbl_title = tk.Label(content, text="Download Rename Watcher 설정", fg=fg_mint, bg=bg_dark, font=header_font)
-    lbl_title.pack(pady=(20, 15))
+    section(tab_general, "감시 대상 폴더", "이 폴더들에 새 파일이 들어오면 AI 가 보고 이름을 바꿉니다. 여러 개 넣을 수 있습니다.", top=10)
+    folders_list_frame, lst_folders = make_listbox(tab_general, height=6)
+    folders_list_frame.pack(fill="x")
 
-    # 설정 필드 배치
-    fields_frame = tk.Frame(content, bg=bg_dark)
-    fields_frame.pack(fill="x", padx=30)
-    fields_frame.grid_columnconfigure(1, weight=1)
+    existing_folders = config.get("watch_folders")
+    if not existing_folders:
+        legacy = config.get("watch_folder")
+        existing_folders = [legacy] if legacy else []
+    for f in existing_folders:
+        lst_folders.insert("end", f)
 
-    # ── 적응형 안내문 ────────────────────────────────────────────────────────
-    # tk.Label은 wraplength가 0이면 줄바꿈을 아예 하지 않아서, 창보다 긴 안내문이 통째로 잘려 나간다.
-    # 게다가 기본 anchor가 center라 오른쪽뿐 아니라 왼쪽까지 잘린다(문장 앞부분이 사라진다).
-    # 그래서 창 크기가 바뀔 때마다 각 라벨이 실제로 쓸 수 있는 폭을 재서 wraplength를 다시 잡아준다.
-    _adaptive_labels = []
+    def add_folder():
+        selected = filedialog.askdirectory(parent=root)
+        if selected and selected not in lst_folders.get(0, "end"):
+            lst_folders.insert("end", selected)
 
-    def register_adaptive(label, min_width=200):
-        """이 라벨을 창 폭에 맞춰 자동 줄바꿈 대상으로 등록한다."""
-        label.configure(justify="left", anchor="w")
-        _adaptive_labels.append((label, min_width))
-        return label
+    def remove_selected_folder():
+        for idx in reversed(lst_folders.curselection()):
+            lst_folders.delete(idx)
 
-    def relayout_adaptive(event=None):
-        total = content.winfo_width()
-        if total <= 1:  # 아직 배치 전이면 폭을 잴 수 없다
-            return
-        for label, min_width in _adaptive_labels:
-            try:
-                # 라벨이 화면에서 실제로 시작하는 x 위치만큼은 쓸 수 없는 폭이다
-                indent = label.winfo_rootx() - content.winfo_rootx()
-            except Exception:
-                indent = 0
-            width = max(min_width, total - indent - 24)
-            # 같은 값을 다시 넣으면 <Configure>가 또 돌아 무한 반복이 되므로 바뀔 때만 적용한다
-            if label.cget("wraplength") != width:
-                label.configure(wraplength=width)
+    folder_btn_row = tk.Frame(tab_general, bg=bg_dark)
+    folder_btn_row.pack(fill="x", pady=(6, 0))
+    flat_button(folder_btn_row, "+ 폴더 추가", add_folder).pack(side="left")
+    flat_button(folder_btn_row, "선택 삭제", remove_selected_folder, fg=DANGER_FG).pack(side="left", padx=(6, 0))
 
-    # 스크롤 영역 갱신 핸들러가 이미 걸려 있으므로 add="+" 로 덧붙인다(안 그러면 기존 핸들러가 지워진다)
-    content.bind("<Configure>", relayout_adaptive, add="+")
+    section(tab_general, "카운트다운 (초)", "이름을 바꾸기 전에 알림을 띄우고 기다리는 시간입니다. 그동안 취소할 수 있습니다.")
+    ent_sec = flat_entry(tab_general, width=8)
+    ent_sec.pack(anchor="w", ipady=3)
+    ent_sec.insert(0, str(config.get("countdown_seconds", 3)))
 
-    # AI 공급자 선택 (사람마다 원하는 AI로 바꿔 쓸 수 있게 함)
+    # =========================================================================
+    # 탭 2. AI — 공급자, (고른 공급자의) 키·모델, 고급: 유료 키
+    # =========================================================================
+    tab_ai = make_page("  AI  ")
+
     PROVIDER_LABELS = {"gemini": "Google Gemini", "openai": "OpenAI (GPT)", "claude": "Anthropic (Claude)"}
     PROVIDER_LABELS_REV = {v: k for k, v in PROVIDER_LABELS.items()}
 
-    tk.Label(fields_frame, text="AI 공급자 :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=0, column=0, sticky="w", pady=6)
-    style = ttk.Style()
-    style.theme_use(style.theme_use())
-    style.configure("Provider.TCombobox", fieldbackground=bg_entry, background=bg_entry, foreground=fg_white)
-    cmb_provider = ttk.Combobox(
-        fields_frame, values=list(PROVIDER_LABELS.values()), state="readonly",
-        style="Provider.TCombobox",
-    )
-    current_provider = config.get("ai_provider", "gemini")
-    if current_provider not in AI_PROVIDERS:
-        current_provider = "gemini"
-    cmb_provider.set(PROVIDER_LABELS[current_provider])
-    cmb_provider.grid(row=0, column=1, sticky="ew", padx=10, pady=6)
-
-    # 공급자별 API 키 (전부 입력해두고 위에서 고른 공급자의 키만 실제로 사용됨)
-    tk.Label(fields_frame, text="Gemini API Key :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=1, column=0, sticky="w", pady=6)
-    ent_gemini_key = tk.Entry(fields_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat")
-    ent_gemini_key.grid(row=1, column=1, sticky="ew", padx=10, pady=6)
-    ent_gemini_key.insert(0, config.get("gemini_api_key", ""))
-
-    # Gemini 모델 버전 선택 (무료 한도는 모델별 하루 20회 — 막히면 file_namer 가 다음 모델로 자동 전환 / 2.5는 신규 키 404)
     # 목록에 없는 값이 config 에 있으면 저장할 때 기본값으로 덮이므로, 쓸 만한 모델은 여기 다 올려 둔다.
     GEMINI_MODEL_LABELS = {
         "gemini-3.5-flash": "Gemini 3.5 Flash (기본)",
@@ -275,29 +413,6 @@ def show_settings_gui():
         "gemini-2.5-flash": "Gemini 2.5 Flash (신규 키는 404 — 기존 사용자만)",
     }
     GEMINI_MODEL_LABELS_REV = {v: k for k, v in GEMINI_MODEL_LABELS.items()}
-    tk.Label(fields_frame, text="Gemini 모델 :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=2, column=0, sticky="w", pady=6)
-    style.configure("GeminiModel.TCombobox", fieldbackground=bg_entry, background=bg_entry, foreground=fg_white)
-    cmb_gemini_model = ttk.Combobox(
-        fields_frame, values=list(GEMINI_MODEL_LABELS.values()), state="readonly",
-        style="GeminiModel.TCombobox",
-    )
-    current_gemini_model = config.get("gemini_model", DEFAULT_GEMINI_MODEL)
-    if current_gemini_model not in GEMINI_MODEL_LABELS:
-        current_gemini_model = DEFAULT_GEMINI_MODEL
-    cmb_gemini_model.set(GEMINI_MODEL_LABELS[current_gemini_model])
-    cmb_gemini_model.grid(row=2, column=1, sticky="ew", padx=10, pady=6)
-
-    tk.Label(fields_frame, text="OpenAI API Key :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=3, column=0, sticky="w", pady=6)
-    ent_openai_key = tk.Entry(fields_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat")
-    ent_openai_key.grid(row=3, column=1, sticky="ew", padx=10, pady=6)
-    ent_openai_key.insert(0, config.get("openai_api_key", ""))
-
-    tk.Label(fields_frame, text="Claude API Key :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=4, column=0, sticky="w", pady=6)
-    ent_claude_key = tk.Entry(fields_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat")
-    ent_claude_key.grid(row=4, column=1, sticky="ew", padx=10, pady=6)
-    ent_claude_key.insert(0, config.get("claude_api_key", ""))
-
-    # Claude 모델 선택 (2026-10-14 추가). 목록에 없는 값이 config 에 있으면 기본값으로 보인다.
     CLAUDE_MODEL_LABELS = {
         "claude-haiku-5-5": "Claude Haiku 5.5 (가장 싸고 빠름)",
         "claude-sonnet-5-5": "Claude Sonnet 5.5 (최신 Sonnet)",
@@ -305,129 +420,143 @@ def show_settings_gui():
         "claude-opus-5-5": "Claude Opus 5.5 (가장 똑똑함, 비쌈)",
     }
     CLAUDE_MODEL_LABELS_REV = {v: k for k, v in CLAUDE_MODEL_LABELS.items()}
-    tk.Label(fields_frame, text="Claude 모델 :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=5, column=0, sticky="w", pady=6)
-    style.configure("ClaudeModel.TCombobox", fieldbackground=bg_entry, background=bg_entry, foreground=fg_white)
-    cmb_claude_model = ttk.Combobox(
-        fields_frame, values=list(CLAUDE_MODEL_LABELS.values()), state="readonly",
-        style="ClaudeModel.TCombobox",
-    )
+
+    section(tab_ai, "AI 공급자", "파일 이름을 지을 AI 를 고릅니다. 고른 공급자의 키와 모델만 아래에 보입니다.", top=10)
+    cmb_provider = ttk.Combobox(tab_ai, values=list(PROVIDER_LABELS.values()), state="readonly")
+    current_provider = config.get("ai_provider", "gemini")
+    if current_provider not in AI_PROVIDERS:
+        current_provider = "gemini"
+    cmb_provider.set(PROVIDER_LABELS[current_provider])
+    cmb_provider.pack(fill="x")
+
+    # 공급자별 칸 묶음 — 고른 것만 보이고, 나머지도 값은 그대로 들고 있다가 같이 저장된다.
+    provider_host = tk.Frame(tab_ai, bg=bg_dark)
+    provider_host.pack(fill="x")
+    provider_frames = {}
+
+    def provider_block(key):
+        fr = tk.Frame(provider_host, bg=bg_dark)
+        provider_frames[key] = fr
+        return fr
+
+    def field_label(parent, text):
+        tk.Label(parent, text=text, fg=fg_white, bg=bg_dark, font=label_font).pack(anchor="w", pady=(14, 4))
+
+    # Gemini
+    fr = provider_block("gemini")
+    field_label(fr, "Gemini API 키")
+    row, ent_gemini_key = secret_entry(fr, config.get("gemini_api_key", ""))
+    row.pack(fill="x")
+    field_label(fr, "Gemini 모델")
+    cmb_gemini_model = ttk.Combobox(fr, values=list(GEMINI_MODEL_LABELS.values()), state="readonly")
+    current_gemini_model = config.get("gemini_model", DEFAULT_GEMINI_MODEL)
+    if current_gemini_model not in GEMINI_MODEL_LABELS:
+        current_gemini_model = DEFAULT_GEMINI_MODEL
+    cmb_gemini_model.set(GEMINI_MODEL_LABELS[current_gemini_model])
+    cmb_gemini_model.pack(fill="x")
+    wrap_label(fr, "무료 한도는 모델별로 걸립니다. 막히면 다른 Gemini 모델로 자동 전환합니다.").pack(anchor="w", fill="x", pady=(4, 0))
+
+    # OpenAI (모델은 코드에 고정)
+    fr = provider_block("openai")
+    field_label(fr, "OpenAI API 키")
+    row, ent_openai_key = secret_entry(fr, config.get("openai_api_key", ""))
+    row.pack(fill="x")
+    wrap_label(fr, f"모델: {OPENAI_MODEL} (고정)").pack(anchor="w", fill="x", pady=(6, 0))
+
+    # Claude
+    fr = provider_block("claude")
+    field_label(fr, "Claude API 키")
+    row, ent_claude_key = secret_entry(fr, config.get("claude_api_key", ""))
+    row.pack(fill="x")
+    field_label(fr, "Claude 모델")
+    cmb_claude_model = ttk.Combobox(fr, values=list(CLAUDE_MODEL_LABELS.values()), state="readonly")
     current_claude_model = config.get("claude_model", DEFAULT_CLAUDE_MODEL)
     if current_claude_model not in CLAUDE_MODEL_LABELS:
         current_claude_model = DEFAULT_CLAUDE_MODEL
     cmb_claude_model.set(CLAUDE_MODEL_LABELS[current_claude_model])
-    cmb_claude_model.grid(row=5, column=1, sticky="ew", padx=10, pady=6)
+    cmb_claude_model.pack(fill="x")
 
-    # 유료(결제 연동) 키 — 무료 키가 한도에 걸리면 자동으로 이 키로 넘어간다. 비워두면 전환 없음.
-    # 공급자는 따로 고를 수 있고, "무료와 동일"이면 빈 문자열로 저장돼 위 ai_provider를 그대로 따른다.
+    def show_provider_fields(_event=None):
+        chosen = PROVIDER_LABELS_REV.get(cmb_provider.get(), "gemini")
+        for key, frame in provider_frames.items():
+            if key == chosen:
+                frame.pack(fill="x")
+            else:
+                frame.pack_forget()
+
+    cmb_provider.bind("<<ComboboxSelected>>", show_provider_fields)
+    show_provider_fields()
+
+    # 고급 설정 — 유료(결제 연동) 키. 무료 키가 한도에 걸리면 자동으로 이 키로 넘어간다.
     PAID_PROVIDER_SAME = "무료와 동일"
     PAID_PROVIDER_LABELS = {"": PAID_PROVIDER_SAME, **PROVIDER_LABELS}
     PAID_PROVIDER_LABELS_REV = {v: k for k, v in PAID_PROVIDER_LABELS.items()}
 
-    tk.Label(fields_frame, text="유료 공급자 :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=6, column=0, sticky="w", pady=6)
-    style.configure("PaidProvider.TCombobox", fieldbackground=bg_entry, background=bg_entry, foreground=fg_white)
-    cmb_paid_provider = ttk.Combobox(
-        fields_frame, values=list(PAID_PROVIDER_LABELS.values()), state="readonly",
-        style="PaidProvider.TCombobox",
+    advanced_open = {"v": False}
+    btn_advanced = tk.Button(
+        tab_ai, text="", bg=bg_dark, fg=sub_color, relief="flat", cursor="hand2", anchor="w",
+        activebackground=bg_dark, activeforeground=fg_white, font=label_font, bd=0,
     )
+    btn_advanced.pack(anchor="w", pady=(22, 0))
+    advanced_frame = tk.Frame(tab_ai, bg=bg_dark)
+
+    field_label(advanced_frame, "유료 공급자")
+    cmb_paid_provider = ttk.Combobox(advanced_frame, values=list(PAID_PROVIDER_LABELS.values()), state="readonly")
     current_paid_provider = (config.get("paid_provider") or "").strip().lower()
     if current_paid_provider not in PAID_PROVIDER_LABELS:
         current_paid_provider = ""
     cmb_paid_provider.set(PAID_PROVIDER_LABELS[current_paid_provider])
-    cmb_paid_provider.grid(row=6, column=1, sticky="ew", padx=10, pady=6)
+    cmb_paid_provider.pack(fill="x")
+    field_label(advanced_frame, "유료 API 키")
+    row, ent_paid_key = secret_entry(advanced_frame, config.get("paid_api_key", ""))
+    row.pack(fill="x")
+    wrap_label(
+        advanced_frame,
+        "무료 키가 한도(429)에 걸리면 자동으로 이 키로 넘어갑니다. 비워두면 전환하지 않습니다. "
+        "과금되는 키이며, 위에서 고른 유료 공급자의 키를 넣어야 합니다. "
+        "Gemini 는 한도가 프로젝트 단위라 같은 프로젝트의 키는 소용없습니다 — 결제 연결된 다른 프로젝트의 키를 쓰세요.",
+    ).pack(anchor="w", fill="x", pady=(6, 0))
 
-    tk.Label(fields_frame, text="유료 API Key :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=7, column=0, sticky="w", pady=6)
-    ent_paid_key = tk.Entry(fields_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat")
-    ent_paid_key.grid(row=7, column=1, sticky="ew", padx=10, pady=6)
-    ent_paid_key.insert(0, config.get("paid_api_key", ""))
-    lbl_paid_desc = tk.Label(
-        fields_frame,
-        text="※ 무료 키가 한도(429)에 걸리면 자동으로 이 키로 넘어갑니다. 비워두면 전환하지 않습니다.\n"
-             "과금되는 키이며, 위에서 고른 유료 공급자의 키를 넣어야 합니다.\n"
-             "Gemini는 한도가 프로젝트 단위라 같은 프로젝트의 키는 소용없습니다 — 결제 연결된 다른 프로젝트의 키를 쓰세요.",
-        fg="#9aa0a6", bg=bg_dark, font=("Malgun Gothic", 8),
+    def toggle_advanced(force=None):
+        advanced_open["v"] = (not advanced_open["v"]) if force is None else force
+        if advanced_open["v"]:
+            advanced_frame.pack(fill="x", after=btn_advanced)
+            btn_advanced.configure(text="▾ 고급 설정 (유료 키)")
+        else:
+            advanced_frame.pack_forget()
+            btn_advanced.configure(text="▸ 고급 설정 (유료 키)")
+
+    btn_advanced.configure(command=toggle_advanced)
+    toggle_advanced(force=False)
+
+    # =========================================================================
+    # 탭 3. 규칙 — 커스텀 지침, 기본 파일명 형식, 자동 이동 규칙
+    # =========================================================================
+    tab_rules = make_page("  규칙  ")
+
+    section(
+        tab_rules, "커스텀 지침",
+        "특정 파일을 어떻게 이름 지을지 한글로 자유롭게 적으세요. 여기 적은 형식이 아래 기본 형식보다 항상 우선합니다.",
+        top=10,
     )
-    register_adaptive(lbl_paid_desc)
-    lbl_paid_desc.grid(row=8, column=1, sticky="ew", padx=10)
-
-    # 지연 타이머 (초)
-    tk.Label(fields_frame, text="카운트다운(초) :", fg=fg_white, bg=bg_dark, font=label_font).grid(row=9, column=0, sticky="w", pady=6)
-    ent_sec = tk.Entry(fields_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat", width=10)
-    ent_sec.grid(row=9, column=1, sticky="w", padx=10, pady=6)
-    ent_sec.insert(0, str(config.get("countdown_seconds", 3)))
-
-    # 감시 대상 폴더 (여러 개)
-    lbl_folders = tk.Label(content, text="감시 대상 폴더 (여러 개 가능) :", fg=fg_mint, bg=bg_dark, font=label_font)
-    lbl_folders.pack(anchor="w", padx=30, pady=(20, 5))
-
-    folders_frame = tk.Frame(content, bg=bg_dark)
-    folders_frame.pack(fill="x", padx=30)
-
-    list_frame = tk.Frame(folders_frame, bg=bg_dark)
-    list_frame.pack(fill="x")
-
-    lst_folders = tk.Listbox(
-        list_frame, bg=bg_entry, fg=fg_white, relief="flat",
-        selectbackground=fg_mint, selectforeground=bg_dark,
-        highlightthickness=1, highlightbackground="#3a3a40",
-        height=5, activestyle="none",
+    rules_frame = tk.Frame(tab_rules, bg=bg_dark)
+    rules_frame.pack(fill="both", expand=True)
+    txt_rules = tk.Text(
+        rules_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, font=body_font,
+        wrap="word", relief="flat", highlightthickness=1, highlightbackground=bg_button,
+        highlightcolor=fg_mint, height=14, width=1, padx=8, pady=6, undo=True,
     )
-    lst_folders.pack(side="left", fill="both", expand=True)
-    lst_scroll = tk.Scrollbar(list_frame, orient="vertical", command=lst_folders.yview)
-    lst_scroll.pack(side="right", fill="y")
-    lst_folders.configure(yscrollcommand=lst_scroll.set)
-
-    existing_folders = config.get("watch_folders")
-    if not existing_folders:
-        legacy = config.get("watch_folder")
-        existing_folders = [legacy] if legacy else []
-    for f in existing_folders:
-        lst_folders.insert("end", f)
-
-    folder_btn_row = tk.Frame(folders_frame, bg=bg_dark)
-    folder_btn_row.pack(fill="x", pady=(6, 0))
-
-    def add_folder():
-        selected = filedialog.askdirectory()
-        if selected:
-            current = list(lst_folders.get(0, "end"))
-            if selected not in current:
-                lst_folders.insert("end", selected)
-
-    def remove_selected_folder():
-        sel = lst_folders.curselection()
-        for idx in reversed(sel):
-            lst_folders.delete(idx)
-
-    btn_add_folder = tk.Button(folder_btn_row, text="+ 폴더 추가", command=add_folder, bg="#3a3a40", fg=fg_white, relief="flat", activebackground="#2a2a2f", activeforeground=fg_white)
-    btn_add_folder.pack(side="left")
-
-    btn_remove_folder = tk.Button(folder_btn_row, text="선택 삭제", command=remove_selected_folder, bg="#3a3a40", fg=DANGER_FG, relief="flat", activebackground="#2a2a2f", activeforeground=DANGER_FG)
-    btn_remove_folder.pack(side="left", padx=(6, 0))
-
-    # 추가 지침 프롬프트 레이블
-    lbl_rules = tk.Label(content, text="AI 추가 설정 및 커스텀 프롬프트 지침 :", fg=fg_mint, bg=bg_dark, font=label_font)
-    lbl_rules.pack(anchor="w", padx=30, pady=(20, 5))
-
-    lbl_rules_desc = tk.Label(content, text="※ 수출신고필증, 계약서 등 특정 파일에 대한 분류 가이드를 한글로 자유롭게 기술하세요.", fg=sub_color, bg=bg_dark, font=desc_font)
-    register_adaptive(lbl_rules_desc)
-    lbl_rules_desc.pack(anchor="w", fill="x", padx=30, pady=(0, 5))
-
-    # 텍스트 영역 (높이를 고정 줄 수로 지정해 작은 화면에서도 항상 일정 부분 보이게 함) + 스크롤바
-    rules_frame = tk.Frame(content, bg=bg_dark)
-    rules_frame.pack(fill="both", expand=True, padx=30, pady=5)
-
-    txt_rules = tk.Text(rules_frame, bg=bg_entry, fg=fg_white, insertbackground=fg_white, font=("Malgun Gothic", 10), wrap="word", relief="flat", highlightthickness=1, highlightbackground="#3a3a40", height=8)
-    txt_rules.pack(side="left", fill="both", expand=True)
-
+    # width=1: Text 기본 폭(80자)이 창보다 넓어 오른쪽이 잘리고 스크롤바가 밀려나던 것 방지(폭은 fill 로 채운다).
+    # 스크롤바를 먼저 pack 해야 공간이 모자랄 때 스크롤바가 아니라 입력칸이 줄어든다.
     rules_scroll = tk.Scrollbar(rules_frame, orient="vertical", command=txt_rules.yview)
     rules_scroll.pack(side="right", fill="y")
+    txt_rules.pack(side="left", fill="both", expand=True)
     txt_rules.configure(yscrollcommand=rules_scroll.set)
 
     # 실제 저장된 지침이 비어 있으면, 회색 예시 한 줄만 안내용으로 보여준다 (저장되는 값 아님)
     RULES_PLACEHOLDER = "예: 카드 사용내역 엑셀이면 카드 끝번호 4자리를 제목에 포함해줘"
     existing_rules = config.get("user_rules", "").strip()
     placeholder_state = {"active": not existing_rules}
-
     if existing_rules:
         txt_rules.insert("1.0", existing_rules)
     else:
@@ -450,50 +579,17 @@ def show_settings_gui():
     txt_rules.bind("<FocusIn>", on_rules_focus_in)
     txt_rules.bind("<FocusOut>", on_rules_focus_out)
 
-    # 기본 파일명 형식 (위 커스텀 프롬프트가 특정 케이스 형식을 지정하면 그쪽이 항상 우선 적용됨)
-    lbl_filename_format = tk.Label(content, text="기본 파일명 형식 :", fg=fg_mint, bg=bg_dark, font=label_font)
-    lbl_filename_format.pack(anchor="w", padx=30, pady=(20, 5))
-
-    lbl_filename_format_desc = tk.Label(
-        content,
-        text="※ date(날짜) summary(내용요약) site(사이트명)를 원하는 순서로 적으세요. 중괄호는 없어도 됩니다. (예: date_summary_site) site가 없으면 자동으로 빠집니다. 전신문처럼 형식이 다른 케이스는 위 커스텀 프롬프트에 직접 적어두면 그게 최우선 적용됨",
-        fg=sub_color, bg=bg_dark, font=desc_font,
+    section(
+        tab_rules, "기본 파일명 형식",
+        "date(날짜) · summary(내용요약) · site(출처)를 원하는 순서로 적으세요. 예: date_summary_site — site 가 없으면 자동으로 빠집니다.",
     )
-    register_adaptive(lbl_filename_format_desc)
-    lbl_filename_format_desc.pack(anchor="w", fill="x", padx=30, pady=(0, 5))
-
-    entry_filename_format = tk.Entry(content, bg=bg_entry, fg=fg_white, insertbackground=fg_white, font=("Malgun Gothic", 10), relief="flat", highlightthickness=1, highlightbackground="#3a3a40")
-    entry_filename_format.pack(fill="x", padx=30, pady=(0, 5))
+    entry_filename_format = flat_entry(tab_rules)
+    entry_filename_format.pack(fill="x", ipady=3)
     entry_filename_format.insert(0, (config.get("filename_format") or "").strip() or DEFAULT_FILENAME_FORMAT)
 
-    # 자동 이동 규칙 (조건에 맞으면 지정한 폴더로 자동 이동)
-    lbl_move_rules = tk.Label(content, text="자동 이동 규칙 (조건에 맞으면 폴더로 이동) :", fg=fg_mint, bg=bg_dark, font=label_font)
-    lbl_move_rules.pack(anchor="w", padx=30, pady=(20, 5))
-
-    lbl_move_rules_desc = tk.Label(
-        content,
-        text="※ 예: '카드 사용내역 엑셀' → D:\\카드정리 폴더. AI가 파일이 조건에 맞다고 판단하면 자동으로 이동시킵니다.",
-        fg=sub_color, bg=bg_dark, font=desc_font,
-    )
-    register_adaptive(lbl_move_rules_desc)
-    lbl_move_rules_desc.pack(anchor="w", fill="x", padx=30, pady=(0, 5))
-
-    move_rules_frame = tk.Frame(content, bg=bg_dark)
-    move_rules_frame.pack(fill="x", padx=30)
-
-    move_rules_list_frame = tk.Frame(move_rules_frame, bg=bg_dark)
-    move_rules_list_frame.pack(fill="x")
-
-    lst_move_rules = tk.Listbox(
-        move_rules_list_frame, bg=bg_entry, fg=fg_white, relief="flat",
-        selectbackground=fg_mint, selectforeground=bg_dark,
-        highlightthickness=1, highlightbackground="#3a3a40",
-        height=5, activestyle="none",
-    )
-    lst_move_rules.pack(side="left", fill="both", expand=True)
-    move_rules_scroll = tk.Scrollbar(move_rules_list_frame, orient="vertical", command=lst_move_rules.yview)
-    move_rules_scroll.pack(side="right", fill="y")
-    lst_move_rules.configure(yscrollcommand=move_rules_scroll.set)
+    section(tab_rules, "자동 이동 규칙", "AI 가 파일이 조건에 맞다고 판단하면 지정한 폴더로 옮깁니다. 예: 카드 사용내역 엑셀 → D:\\카드정리")
+    move_list_frame, lst_move_rules = make_listbox(tab_rules, height=5)
+    move_list_frame.pack(fill="x")
 
     move_rules_state = [dict(r) for r in (config.get("move_rules") or [])]
 
@@ -510,17 +606,18 @@ def show_settings_gui():
         dialog.configure(bg=bg_dark)
         dialog.attributes("-topmost", True)
         dialog.resizable(False, False)
+        dialog.transient(root)
 
         tk.Label(dialog, text="조건 설명 (예: 카드 사용내역 엑셀 파일)", fg=fg_white, bg=bg_dark, font=label_font).pack(anchor="w", padx=16, pady=(16, 4))
-        ent_condition = tk.Entry(dialog, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat", width=46)
-        ent_condition.pack(fill="x", padx=16)
+        ent_condition = flat_entry(dialog, width=46)
+        ent_condition.pack(fill="x", padx=16, ipady=3)
         ent_condition.focus_set()
 
         tk.Label(dialog, text="이동할 폴더", fg=fg_white, bg=bg_dark, font=label_font).pack(anchor="w", padx=16, pady=(16, 4))
         dest_row = tk.Frame(dialog, bg=bg_dark)
         dest_row.pack(fill="x", padx=16)
-        ent_dest = tk.Entry(dest_row, bg=bg_entry, fg=fg_white, insertbackground=fg_white, relief="flat")
-        ent_dest.pack(side="left", fill="x", expand=True)
+        ent_dest = flat_entry(dest_row)
+        ent_dest.pack(side="left", fill="x", expand=True, ipady=3)
 
         def browse_dest():
             selected = filedialog.askdirectory(parent=dialog)
@@ -528,7 +625,7 @@ def show_settings_gui():
                 ent_dest.delete(0, "end")
                 ent_dest.insert(0, selected)
 
-        tk.Button(dest_row, text="찾기...", command=browse_dest, bg="#3a3a40", fg=fg_white, relief="flat", activebackground="#2a2a2f", activeforeground=fg_white).pack(side="left", padx=(6, 0))
+        flat_button(dest_row, "찾기...", browse_dest).pack(side="left", padx=(6, 0))
 
         def confirm_add():
             cond = ent_condition.get().strip()
@@ -542,44 +639,42 @@ def show_settings_gui():
 
         btn_row = tk.Frame(dialog, bg=bg_dark)
         btn_row.pack(fill="x", padx=16, pady=20)
-        tk.Button(btn_row, text="추가", command=confirm_add, bg=fg_mint, fg=bg_dark, font=("Malgun Gothic", 10, "bold"), relief="flat", cursor="hand2").pack(side="left")
-        tk.Button(btn_row, text="취소", command=dialog.destroy, bg="#3a3a40", fg=fg_white, relief="flat", activebackground="#2a2a2f", activeforeground=fg_white).pack(side="left", padx=(8, 0))
+        flat_button(btn_row, "추가", confirm_add, primary=True).pack(side="left")
+        flat_button(btn_row, "취소", dialog.destroy).pack(side="left", padx=(8, 0))
 
     def remove_selected_move_rule():
-        sel = lst_move_rules.curselection()
-        for idx in reversed(sel):
+        for idx in reversed(lst_move_rules.curselection()):
             del move_rules_state[idx]
         refresh_move_rules_listbox()
 
-    move_rules_btn_row = tk.Frame(move_rules_frame, bg=bg_dark)
-    move_rules_btn_row.pack(fill="x", pady=(6, 0))
+    move_btn_row = tk.Frame(tab_rules, bg=bg_dark)
+    move_btn_row.pack(fill="x", pady=(6, 0))
+    flat_button(move_btn_row, "+ 규칙 추가", add_move_rule).pack(side="left")
+    flat_button(move_btn_row, "선택 삭제", remove_selected_move_rule, fg=DANGER_FG).pack(side="left", padx=(6, 0))
 
-    btn_add_move_rule = tk.Button(move_rules_btn_row, text="+ 규칙 추가", command=add_move_rule, bg="#3a3a40", fg=fg_white, relief="flat", activebackground="#2a2a2f", activeforeground=fg_white)
-    btn_add_move_rule.pack(side="left")
-
-    btn_remove_move_rule = tk.Button(move_rules_btn_row, text="선택 삭제", command=remove_selected_move_rule, bg="#3a3a40", fg=DANGER_FG, relief="flat", activebackground="#2a2a2f", activeforeground=DANGER_FG)
-    btn_remove_move_rule.pack(side="left", padx=(6, 0))
-
-    # 저장 프로세스
+    # =========================================================================
+    # 저장
+    # =========================================================================
     def on_save():
         sec_val = ent_sec.get().strip()
         if not sec_val.isdigit():
-            messagebox.showerror("데이터 오류", "카운트다운은 반드시 숫자형(초)으로 입력해야 합니다.")
+            nb.select(0)
+            messagebox.showerror("데이터 오류", "카운트다운은 반드시 숫자(초)로 입력해야 합니다.", parent=root)
             return
 
         folders = [f for f in lst_folders.get(0, "end") if f.strip()]
         if not folders:
-            messagebox.showerror("데이터 오류", "감시 대상 폴더를 최소 1개 이상 추가해야 합니다.")
+            nb.select(0)
+            messagebox.showerror("데이터 오류", "감시 대상 폴더를 최소 1개 이상 추가해야 합니다.", parent=root)
             return
 
         rules_val = "" if placeholder_state["active"] else txt_rules.get("1.0", "end-1c").strip()
-        filename_format_val = entry_filename_format.get().strip() or DEFAULT_FILENAME_FORMAT
-        provider_val = PROVIDER_LABELS_REV.get(cmb_provider.get(), "gemini")
-        gemini_model_val = GEMINI_MODEL_LABELS_REV.get(cmb_gemini_model.get(), DEFAULT_GEMINI_MODEL)
 
-        new_config = {
-            "ai_provider": provider_val,
-            "gemini_model": gemini_model_val,
+        # 화면에 없는 키(gemini_model_rotation 등)를 지우지 않도록 기존 설정 위에 덮어쓴다
+        new_config = dict(config)
+        new_config.update({
+            "ai_provider": PROVIDER_LABELS_REV.get(cmb_provider.get(), "gemini"),
+            "gemini_model": GEMINI_MODEL_LABELS_REV.get(cmb_gemini_model.get(), DEFAULT_GEMINI_MODEL),
             "gemini_api_key": ent_gemini_key.get().strip(),
             "openai_api_key": ent_openai_key.get().strip(),
             "claude_api_key": ent_claude_key.get().strip(),
@@ -592,26 +687,20 @@ def show_settings_gui():
             "max_preview_chars": config.get("max_preview_chars", 2000),
             "user_rules": rules_val,
             "move_rules": move_rules_state,
-            "filename_format": filename_format_val,
-        }
+            "filename_format": entry_filename_format.get().strip() or DEFAULT_FILENAME_FORMAT,
+        })
 
         if save_config(new_config):
-            messagebox.showinfo("설정 적용 완료", "설정이 안전하게 저장되었습니다!\n실행 중인 감시 엔진에 실시간 적용됩니다.")
+            messagebox.showinfo("설정 적용 완료", "설정이 저장되었습니다.\n실행 중인 감시 엔진에 바로 적용됩니다.", parent=root)
             on_close()
         else:
-            messagebox.showerror("저장 실패", "설정 파일 작성에 실패했습니다.")
+            messagebox.showerror("저장 실패", "설정 파일 작성에 실패했습니다.", parent=root)
 
-    btn_save = tk.Button(
-        content, text="설정 및 추가 지침 저장하기", command=on_save,
-        bg=fg_mint, fg=bg_dark, font=("Malgun Gothic", 10, "bold"),
-        relief="flat", cursor="hand2", padx=20, pady=8,
-        activebackground="#58d0a3", activeforeground=bg_dark
-    )
-    btn_save.pack(pady=20)
-
-    # 위젯 배치가 끝나야 폭을 잴 수 있으므로, 창이 그려진 직후 한 번 접어준다.
-    # (이후로는 창 크기가 바뀔 때마다 <Configure>가 알아서 다시 접는다)
-    root.after(120, relayout_adaptive)
+    bottom_inner = tk.Frame(bottom, bg=bg_entry)
+    bottom_inner.pack(fill="x", padx=24, pady=10)
+    flat_button(bottom_inner, "저장", on_save, primary=True).pack(side="right")
+    flat_button(bottom_inner, "취소", on_close).pack(side="right", padx=(0, 8))
+    root.bind("<Control-s>", lambda e: on_save())
 
     root.mainloop()
 
