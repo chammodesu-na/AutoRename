@@ -16,7 +16,7 @@ import hashlib
 import tempfile
 import urllib.request
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 REPO = "chammodesu-na/AutoRename"
 ASSET_NAME = "AutoRenameSetup.exe"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"

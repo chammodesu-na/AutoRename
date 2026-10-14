@@ -680,32 +680,40 @@ def show_settings_gui():
         dlg.configure(fg_color=CARD)
         dlg.transient(root)
         dlg.attributes("-topmost", True)
-        dlg.resizable(False, False)
-        dw, dh = 500, {"rule": 640, "move": 600, "common": 600}[kind]
+        # 창 크기는 설정 창에 맞추고 사용자가 늘릴 수 있게 둔다. 입력칸이 남는 공간을 채운다
+        # (고정 크기에 스크롤만 두면 긴 지침이 답답하고, 공통 지침 창에선 저장 버튼이 밀려 안 보였다 — 2026-10-14).
+        dlg.resizable(True, True)
+        dlg.minsize(440, 480)
+        dw = max(min(root.winfo_width() - 40, 640), 460)
+        dh = max(root.winfo_height() - 60, 560)
         rx, ry = root.winfo_rootx(), root.winfo_rooty()
-        dlg.geometry(f"{dw}x{dh}+{rx + max((root.winfo_width() - dw) // 2, 0)}+{ry + 40}")
+        dlg.geometry(f"{dw}x{dh}+{rx + max((root.winfo_width() - dw) // 2, 0)}+{ry + 30}")
         dlg.after(250, _set_icon_for(dlg))
 
+        # 버튼줄을 본문보다 먼저 pack 해야 창이 작아져도 항상 맨 아래에 남는다(pack 은 먼저 넣은 것에 자리를 먼저 준다)
+        foot = ctk.CTkFrame(dlg, fg_color="transparent")
+        foot.pack(side="bottom", fill="x", padx=24, pady=(8, 20))
+
         body = ctk.CTkFrame(dlg, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=24, pady=20)
+        body.pack(fill="both", expand=True, padx=24, pady=(20, 0))
         label(body, title, 18, True).pack(anchor="w", pady=(0, 12))
 
         fields = {}
         if kind == "rule":
             label(body, "어떤 파일일 때", 13, True).pack(anchor="w", pady=(0, 4))
-            fields["when"] = textbox(body, initial.get("when", ""), 60)
+            fields["when"] = textbox(body, initial.get("when", ""), 64)
             fields["when"].pack(fill="x", pady=(0, 10))
             label(body, "이름은 이렇게", 13, True).pack(anchor="w", pady=(0, 4))
             fields["how"] = textbox(body, initial.get("how", ""), 80)
-            fields["how"].pack(fill="x", pady=(0, 10))
+            fields["how"].pack(fill="both", expand=True, pady=(0, 10))   # 긴 쪽이 남는 공간을 채운다
         elif kind == "move":
             label(body, "이런 파일이면", 13, True).pack(anchor="w", pady=(0, 4))
-            fields["when"] = textbox(body, initial.get("keyword", ""), 60)
-            fields["when"].pack(fill="x", pady=(0, 10))
+            fields["when"] = textbox(body, initial.get("keyword", ""), 64)
+            fields["when"].pack(fill="both", expand=True, pady=(0, 10))
         else:
             label(body, "모든 파일에 항상 같이 적용할 지침", 13, True).pack(anchor="w", pady=(0, 4))
-            fields["when"] = textbox(body, initial.get("text", ""), 200)
-            fields["when"].pack(fill="x", pady=(0, 10))
+            fields["when"] = textbox(body, initial.get("text", ""), 120)
+            fields["when"].pack(fill="both", expand=True, pady=(0, 10))
 
         # AI로 다듬기 — 저장된 설정의 1순위 키로 호출. 화면에서 고쳤어도 저장 전이면 반영되지 않는다.
         saved_chain = get_ai_chain(load_config())
@@ -717,8 +725,18 @@ def show_settings_gui():
         label(arow, f"AI 탭 1순위({model_hint})로 한 번 호출해요 · 0.1센트 미만" if saved_chain else "AI 탭 1순위 키로 한 번 호출해요",
               11, color=SUB).pack(side="left", padx=(10, 0))
 
-        status = ctk.CTkFrame(body, fg_color="transparent")
+        # CTkFrame 은 비어 있으면 기본 높이 200px 을 차지해 입력칸 아래에 빈 공간이 생긴다 → height=1
+        status = ctk.CTkFrame(body, fg_color="transparent", height=1)
         status.pack(fill="x")
+        status_labels = []
+
+        def rewrap_status(_e=None):
+            width = max(status.winfo_width() - 40, 200)
+            for lb in status_labels:
+                if lb.winfo_exists():
+                    lb.configure(wraplength=width)
+
+        status.bind("<Configure>", rewrap_status, add="+")
 
         def box(bg, bd, title_text, title_color, msg, actions=()):
             for w in status.winfo_children():
@@ -729,7 +747,8 @@ def show_settings_gui():
             inner.pack(fill="x", padx=14, pady=12)
             label(inner, title_text, 12, True, color=title_color).pack(anchor="w")
             lbl = label(inner, msg, 13)
-            lbl.configure(wraplength=dw - 90)
+            status_labels[:] = [lbl]
+            lbl.configure(wraplength=max(status.winfo_width() - 40, 200) if status.winfo_width() > 1 else dw - 90)
             lbl.pack(anchor="w", fill="x", pady=(4, 0))
             if actions:
                 ar = ctk.CTkFrame(inner, fg_color="transparent")
@@ -817,9 +836,6 @@ def show_settings_gui():
                     dest.insert(0, sel)
 
             button(drow, "찾기", browse, "field", width=60, height=38).pack(side="left", padx=(6, 0))
-
-        foot = ctk.CTkFrame(dlg, fg_color="transparent")
-        foot.pack(side="bottom", fill="x", padx=24, pady=(0, 20))
 
         def ok():
             if kind == "rule":
