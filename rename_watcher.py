@@ -7,6 +7,7 @@ rename_watcher.py (고성능 실시간 감시 엔진)
 """
 
 import os
+import stat
 import sys
 import time
 import threading
@@ -110,6 +111,21 @@ def wait_until_stable(path: str, timeout: float = 15.0) -> bool:
             last_size = size
         time.sleep(STABILIZE_CHECK_INTERVAL)
     return True
+
+
+def clear_readonly(path: str):
+    """
+    읽기 전용 속성이 붙어 있으면 해제.
+    wait_until_unlocked()가 쓰기 모드(r+b)로 열어보기 때문에, 읽기 전용 파일은 해제 안 하면
+    매번 '잠금 해제 실패'로 판정돼 이름변경이 통째로 건너뛰어진다.
+    """
+    try:
+        mode = os.stat(path).st_mode
+        if not mode & stat.S_IWRITE:
+            os.chmod(path, mode | stat.S_IWRITE)
+            log(f"[읽기 전용 해제] {os.path.basename(path)}")
+    except OSError as e:
+        log(f"[읽기 전용 해제 실패] {os.path.basename(path)}: {e}")
 
 
 def wait_until_unlocked(path: str, timeout: float = 10.0, interval: float = 0.5) -> bool:
@@ -515,6 +531,7 @@ def handle_rename(filepath: str):
         return
     if not os.path.exists(filepath):
         return
+    clear_readonly(filepath)
 
     fullname = os.path.basename(filepath)
     basename, ext = os.path.splitext(fullname)
