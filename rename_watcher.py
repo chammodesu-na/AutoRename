@@ -7,6 +7,7 @@ rename_watcher.py (고성능 실시간 감시 엔진)
 """
 
 import os
+import stat
 import sys
 import time
 import threading
@@ -117,6 +118,9 @@ def wait_until_unlocked(path: str, timeout: float = 10.0, interval: float = 0.5)
     파일을 배타적으로 열 수 있을 때까지 대기.
     크기가 안정됐어도 브라우저/다른 프로세스가 핸들을 잡고 있을 수 있음.
     """
+    # 읽기전용 파일은 쓰기 모드("r+b")로 영원히 안 열려서, 잠긴 게 아닌데도 10초 기다리다 건너뛰었다
+    # (은행 사이트에서 저장한 송금확인서 PDF 등 — 2026-10-16 확인). 먼저 읽기전용을 풀어 일반 파일로 만든다.
+    clear_readonly(path)
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -125,6 +129,19 @@ def wait_until_unlocked(path: str, timeout: float = 10.0, interval: float = 0.5)
         except (OSError, IOError):
             time.sleep(interval)
     return False  # 타임아웃 내에 핸들이 안 풀림 -> 이름변경 건너뜀
+
+
+def clear_readonly(path: str) -> bool:
+    """읽기전용 속성이 있으면 해제한다. 해제했으면 True."""
+    try:
+        if os.access(path, os.W_OK):
+            return False
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        log(f"[읽기전용 해제] {os.path.basename(path)}")
+        return True
+    except OSError as e:
+        log(f"[읽기전용 해제 실패] {os.path.basename(path)}: {e}")
+        return False
 
 
 self_renamed_paths = {}
